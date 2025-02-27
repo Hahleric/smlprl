@@ -3,6 +3,7 @@ from gym import spaces
 import itertools
 import numpy as np
 import torch
+from tqdm import tqdm
 
 def sample_request_item(pos_items, pos_ratings, zipf_s=1.0):
     """
@@ -32,7 +33,7 @@ class CarCachingEnv(gym.Env):
     若请求命中当前 RSU 缓存则给予正奖励，否则给予惩罚。
     候选缓存集合由训练好的 LightGCN 模型根据当前车辆用户推荐结果（例如 Top20）生成。
     """
-    def __init__(self, crossroad, recommender, norm_adj, num_items,
+    def __init__(self, args, crossroad, recommender, norm_adj, num_items,
                  test_user_ratings, cache_capacity=5, zipf_s=0.8, topk_candidate=20):
         """
         :param crossroad: Crossroad 实例（包含车辆、RSU 及车辆运动逻辑）
@@ -45,6 +46,7 @@ class CarCachingEnv(gym.Env):
         :param topk_candidate: 用 LightGCN 生成候选缓存集合时取的 top-K 数
         """
         super(CarCachingEnv, self).__init__()
+        self.args = args
         self.crossroad = crossroad
         self.recommender = recommender    # 已训练好的 LightGCN 模型
         self.norm_adj = norm_adj          # GPU 上的归一化邻接矩阵
@@ -86,7 +88,7 @@ class CarCachingEnv(gym.Env):
             # 如果没有车辆，则使用默认候选集合
             self.cache_candidate_set = np.arange(0, min(100, self.num_items))
         else:
-            user_tensor = torch.tensor(user_ids, dtype=torch.long).cuda()
+            user_tensor = torch.tensor(user_ids, dtype=torch.long).to(device=self.args.device)
             with torch.no_grad():
                 user_embeds, item_embeds = self.recommender(self.norm_adj)
                 # 对当前车辆用户的嵌入取平均，形成一个整体“兴趣向量”
@@ -113,50 +115,70 @@ class CarCachingEnv(gym.Env):
         return self._get_state()
 
     def step(self, action):
-        # 更新当前缓存配置：将动作转换为候选集合中的索引组合
+        # 更新缓存配置
+        self.update_candidate_set()
         self.current_cache = self.action_list[action]
         cache_files = [int(self.cache_candidate_set[idx]) for idx in self.current_cache]
 
         total_reward = 0.0
         hit_count = 0
-        # 预先计算 LightGCN 的用户和项目嵌入（一次性计算）
+        delay_penalty = 0.0  # 额外的基于延迟的惩罚
+
+        # 预计算 LightGCN 产生的用户嵌入
         with torch.no_grad():
             user_embeds, item_embeds = self.recommender(self.norm_adj)
-        # 对环境中每辆车发起请求
-        for vehicle in self.crossroad.vehicles:
+
+        # 遍历所有车辆
+        for vehicle in tqdm(self.crossroad.vehicles, desc="Processing vehicles", leave=False):
             uid = vehicle.user_id
-            # 获取该用户对应的嵌入
             user_emb = user_embeds[uid]
+
             for _ in range(self.num_requests_per_vehicle):
                 if uid in self.test_user_ratings:
                     pos_items, pos_ratings = self.test_user_ratings[uid]
                 else:
                     pos_items, pos_ratings = [], []
+
                 requested_item = sample_request_item(pos_items, pos_ratings, self.zipf_s)
                 if requested_item == -1:
                     continue
-                # 计算预测得分（映射到 [0,1]）
-                score = torch.sigmoid((user_emb * item_embeds[requested_item]).sum()).item()
+
+                # 计算车辆到 RSU 的带宽和距离
+                bandwidth = vehicle.get_bandwidth(self.crossroad.rsu.position)
+                distance = np.linalg.norm(vehicle.position - self.crossroad.rsu.position)
+                normalized_distance = distance / self.crossroad.max_distance  # 归一化距离
+                delay = 1 / (bandwidth + 1e-6)  # 避免除零
+
                 if requested_item in cache_files:
-                    total_reward += (1.5 * score)
+                    # 命中缓存，根据 QoE 计算奖励
+                    qoe_gain = 1.0 - normalized_distance  # 近距离时 QoE 提升更大
+                    total_reward += 1 + qoe_gain  # 额外奖励 QoE 提升
                     hit_count += 1
                 else:
-                    total_reward += -0.1 * score  # 这里将未命中时的奖励设置为 0
+                    # 未命中，计算动态惩罚
+                    delay_penalty = min(1.0, delay)  # 限制最大惩罚
+                    total_reward -= (0.1 + delay_penalty)  # 综合惩罚
+
         num_total = self.num_requests_per_vehicle * len(self.crossroad.vehicles)
         avg_reward = total_reward / num_total if num_total > 0 else 0.0
 
+        # 模拟下一步
         self.crossroad.simulate_step(dt=1.0)
         self.current_step += 1
         next_state = self._get_state()
         done = (self.current_step >= self.max_steps)
+
+        # 记录统计信息
         info = {
             "cache_hits": hit_count,
             "total_requests": num_total,
             "hit_rate": hit_count / num_total if num_total > 0 else 0.0
         }
+
         if self.current_step % 50 == 0:
-            print(f"Step {self.current_step}, Avg Reward: {avg_reward:.4f}, Hit Rate: {info['hit_rate']:.4f}, "
-                  f"Cache Hits: {hit_count}/{num_total}")
+            print(f"Step {self.current_step}, Avg Reward: {avg_reward:.4f}, "
+                  f"Hit Rate: {info['hit_rate']:.4f}, Cache Hits: {hit_count}/{num_total}")
+
         return next_state, avg_reward, done, info
 
     def _get_state(self):

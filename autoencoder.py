@@ -68,7 +68,7 @@ def create_norm_adj_matrix(train_matrix):
     indices = torch.from_numpy(np.vstack((A_norm.row, A_norm.col)).astype(np.int64))
     values = torch.from_numpy(A_norm.data.astype(np.float32))
     shape = torch.Size(A_norm.shape)
-    norm_adj = torch.sparse.FloatTensor(indices, values, shape).cuda()
+    norm_adj = torch.sparse.FloatTensor(indices, values, shape)
     return norm_adj
 
 
@@ -167,9 +167,9 @@ def train_lightgcn(model, norm_adj, train_dataset, num_epochs=10, batch_size=102
         total_loss = 0.0
         for batch in train_loader:
             u, pos, neg = batch
-            u = u.cuda()
-            pos = pos.cuda()
-            neg = neg.cuda()
+            u = u
+            pos = pos
+            neg = neg
 
             optimizer.zero_grad()
             user_embeds, item_embeds = model(norm_adj)
@@ -203,7 +203,7 @@ def evaluate_lightgcn(model, norm_adj, train_matrix, test_matrix, topk=20):
         user_embeds, item_embeds = model(norm_adj)
         all_scores = torch.matmul(user_embeds, item_embeds.t())  # shape: (num_users, num_items)
         # 屏蔽训练集中的交互
-        train_tensor = torch.from_numpy(train_matrix).cuda()
+        train_tensor = torch.from_numpy(train_matrix)
         all_scores[train_tensor > 0] = -1e8
         all_scores_np = all_scores.cpu().numpy()
         test_np = test_matrix
@@ -252,7 +252,7 @@ if __name__ == '__main__':
     # 初始化 LightGCN 模型，并移到GPU上
     embedding_dim = 64
     num_layers = 3
-    model = LightGCN(num_users, num_items, embedding_dim, num_layers, dropout=0.1).cuda()
+    model = LightGCN(num_users, num_items, embedding_dim, num_layers, dropout=0.1)
 
     # 训练模型
     # train_lightgcn(model, norm_adj, train_dataset, num_epochs=50, batch_size=1024, lr=0.001)

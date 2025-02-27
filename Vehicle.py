@@ -24,6 +24,8 @@ class Vehicle:
         distance = np.linalg.norm(self.position - rsu_position)
         bandwidth = B0 * np.exp(-alpha * distance) + np.random.normal(0, 0.5)
         return max(bandwidth, 0)
+    def get_position(self):
+        return self.position
 
 # RSU 类（用于带宽计算，不含缓存状态，缓存由环境管理）
 class RSU:
@@ -51,6 +53,7 @@ class Crossroad:
         self.vehicle_counter = 0
         # 保存预处理得到的用户兴趣向量字典
         self.user_interest_dict = user_interest_dict
+        self.max_distance = np.linalg.norm([width, height])
 
     def generate_vehicle(self, user_id=None, position=None, speed=None, interest_vector=None):
         if user_id is None:

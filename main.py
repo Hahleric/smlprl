@@ -5,23 +5,13 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-from collections import deque
-from gym import spaces
-import gym
-from Vehicle import Crossroad
-from Vehicle import RSU
-from Vehicle import Vehicle
-from dataloader import MovieLensDataLoader
-from Env import sample_request_item
 from Env import CarCachingEnv
 from autoencoder import LightGCN
-from Agent import DQNAgent
+from Agent import DQNAgent, PPOAgent, DSACAgent
 import matplotlib.pyplot as plt
-
+from config import get_config
 from autoencoder import load_ml1m, build_user_item_matrix, create_norm_adj_matrix
+device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
 def construct_test_user_ratings(test_matrix):
     """
     构造一个字典：user -> (pos_items, pos_ratings)
@@ -39,9 +29,9 @@ def construct_test_user_ratings(test_matrix):
 #####################################
 def main():
     # 检查GPU
-    if not torch.cuda.is_available():
-        print("GPU不可用，请检查CUDA配置。")
-        return
+
+    args = get_config()
+    device = args.device
 
     # 加载 ml-1m 数据
     filepath = "ml-1m/ratings.dat"
@@ -62,9 +52,9 @@ def main():
     # 加载训练好的 LightGCN 模型
     embedding_dim = 64
     num_layers = 3
-    recommender = LightGCN(num_users, num_items, embedding_dim, num_layers, dropout=0.1).cuda()
+    recommender = LightGCN(num_users, num_items, embedding_dim, num_layers, dropout=0.1)
     if os.path.exists('lightgcn_model.pth'):
-        recommender.load_state_dict(torch.load('lightgcn_model.pth'))
+        recommender.load_state_dict(torch.load('lightgcn_model.pth', map_location='cpu'))
         recommender.eval()
         print("LightGCN 模型已加载。")
     else:
@@ -72,13 +62,18 @@ def main():
         return
 
     # 初始化车联网缓存环境
-    env = CarCachingEnv(crossroad, recommender, norm_adj, num_items, test_user_ratings,
-                          cache_capacity=20, zipf_s=1.0)
+    env = CarCachingEnv(args, crossroad, recommender, norm_adj, num_items, test_user_ratings,
+                          cache_capacity=10, zipf_s=1.0)
 
     # 初始化 DQN 代理
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
-    agent = DQNAgent(state_dim, action_dim)
+    if args.agent == 'ppo':
+        agent = PPOAgent(state_dim=state_dim, action_dim=action_dim, device=args.device)
+    elif args.agent == 'dqn':
+        agent = DQNAgent(args, state_dim, action_dim)
+    elif args.agent == 'dsac':
+        agent = DSACAgent(state_dim, action_dim, device=args.device)
 
     num_episodes = 200
     target_update_freq = 10
@@ -90,18 +85,25 @@ def main():
         episode_hit_ratio = 0.0
         episode_requests = 0
         while not done:
-            action = agent.select_action(state)
-            next_state, reward, done, info = env.step(action)
-            agent.store_transition(state, action, reward, next_state, done)
-            agent.train_step()
+            if args.agent == 'ppo':
+                action, log_prob = agent.select_action(state)
+                next_state, reward, done, info = env.step(action)
+                agent.store_transition(state, action, log_prob, reward, done, next_state)
+            elif args.agent == 'dqn' or args.agent == 'dsac':
+                action = agent.select_action(state)
+                next_state, reward, done, info = env.step(action)
+                agent.store_transition(state, action, reward, next_state, done)
+                agent.train_step()
             state = next_state
             total_reward += reward
             episode_hit_ratio += info['cache_hits']
             episode_requests += info['total_requests']
-        if (episode + 1) % target_update_freq == 0:
+        if args.agent == 'ppo':
+            agent.update()
+        elif (args.agent == 'dqn' or args.agent == 'dsac')and (episode + 1) % target_update_freq == 0:
             agent.update_target()
         hit_ratios.append(episode_hit_ratio / episode_requests)
-        print(f"Episode {episode+1}/{num_episodes}, Total Reward: {total_reward:.4f}, Epsilon: {agent.epsilon:.4f}")
+        print(f"Episode {episode+1}/{num_episodes}, Total Reward: {total_reward:.4f}")
     plot_hit_ratio(hit_ratios)
 
     # 保存训练好的代理模型
