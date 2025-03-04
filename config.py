@@ -35,7 +35,7 @@ def get_config():
     parser.add_argument('--actor_lr', type=float, default=1e-4, help='Actor 网络的学习率')
     parser.add_argument('--critic_lr', type=float, default=1e-3, help='Critic 网络的学习率')
     parser.add_argument('--entropy_coef', type=float, default=0.01, help='熵正则化系数，鼓励探索')
-    parser.add_argument('--agent', type=str, default='dsac', help='RL agent going to be used')
+    parser.add_argument('--agent', type=str, default='dqn', help='RL agent going to be used')
 
     # 设备设置
     parser.add_argument('--device', type=str, default='mps', help='使用的设备，默认为 mps，如果不可用则为 cpu')
