@@ -1,8 +1,12 @@
 
 import numpy as np
 import torch as t
+
+from config import get_config
+
 # 假设已有的 Vehicle, RSU, Crossroad 类（参考前面代码）
 # Vehicle 类示例（修正 generate_request 中 interest_vector 的引用）
+args = get_config()
 class Vehicle:
     def __init__(self, user_id, position, speed, interest_vector):
         """
@@ -42,7 +46,7 @@ class RSU:
 
 # Crossroad 类（管理车辆生成、更新、删除等）
 class Crossroad:
-    def __init__(self, width, height, rsu_position=None, B0=10.0, alpha=0.1, spawn_rate=0.2, user_interest_dict=None):
+    def __init__(self, width, height, rsu_position=None, B0=10.0, alpha=0.1, spawn_rate=args.spawn_rate, user_interest_dict=None):
         self.width = width
         self.height = height
         if rsu_position is None:
@@ -63,6 +67,7 @@ class Crossroad:
             else:
                 user_id = self.vehicle_counter
                 self.vehicle_counter += 1
+                self.vehicle_counter = self.vehicle_counter % 6040
 
         if position is None:
             # 随机生成在区域内部的位置

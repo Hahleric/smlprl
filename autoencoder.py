@@ -98,18 +98,22 @@ class LightGCN(nn.Module):
         nn.init.xavier_uniform_(self.item_embedding.weight)
 
     def forward(self, norm_adj):
-        # 拼接用户和项目初始嵌入 (shape: (num_users+num_items, embedding_dim))
+        # 拼接用户和项目初始嵌入
         all_embeddings = torch.cat([self.user_embedding.weight, self.item_embedding.weight], dim=0)
-        embeddings_list = [all_embeddings]
+        # 如果使用 MPS 后端，将 norm_adj 移动到 CPU 上计算稀疏矩阵乘法
+        norm_adj_cpu = norm_adj.cpu()
+        all_embeddings_cpu = all_embeddings.cpu()
+        embeddings_list = [all_embeddings_cpu]
 
         for _ in range(self.num_layers):
-            # 图传播：使用稀疏矩阵乘法
-            all_embeddings = torch.sparse.mm(norm_adj, all_embeddings)
+            all_embeddings_cpu = torch.sparse.mm(norm_adj_cpu, all_embeddings_cpu)
             if self.dropout:
-                all_embeddings = F.dropout(all_embeddings, self.dropout, training=self.training)
-            embeddings_list.append(all_embeddings)
+                all_embeddings_cpu = F.dropout(all_embeddings_cpu, self.dropout, training=self.training)
+            embeddings_list.append(all_embeddings_cpu)
         # 平均所有层的嵌入
         final_embedding = sum(embeddings_list) / (self.num_layers + 1)
+        # 将结果转回模型所在设备
+        final_embedding = final_embedding.to(self.user_embedding.weight.device)
         # 分割用户和项目嵌入
         user_final, item_final = torch.split(final_embedding, [self.num_users, self.num_items], dim=0)
         return user_final, item_final
@@ -229,9 +233,6 @@ def evaluate_lightgcn(model, norm_adj, train_matrix, test_matrix, topk=20):
 #####################################
 if __name__ == '__main__':
     # 检查GPU是否可用
-    if not torch.cuda.is_available():
-        print("GPU不可用，请检查CUDA环境。")
-        exit(1)
 
     # 加载 ml-1m 数据，确保文件路径正确
     filepath = "ml-1m/ratings.dat"

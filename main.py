@@ -6,40 +6,41 @@ from collections import deque
 import itertools
 from tqdm import tqdm
 import os
-
-
+import datetime
+from Env import sample_request_item
+from config import get_config
 # 假设前面已有的 Vehicle、RSU、Crossroad、CarCachingEnv、sample_request_item 等已正确定义和导入
-
+args = get_config()
 #############################################
 # 传统缓存策略仿真函数：LRU 与 LFU
 #############################################
+#############################################
+# 传统缓存策略仿真函数：LRU、LFU、FIFO、MRU、Random、2Q
+#############################################
 def simulate_traditional_policy(env, policy, num_episodes):
     """
-    对传统缓存策略进行仿真：
-      - 每个 episode 中首先调用 env.reset() 重置车辆状态，
-      - 初始化 RSU 缓存为空，
-      - 在每个时间步中，遍历所有车辆采样请求，判断缓存命中（命中则更新缓存状态；未命中则插入缓存——若已满则根据策略进行淘汰）。
-    支持的策略：
-      "LRU" - 最近最少使用：命中后将该项移动到队尾，未命中时若缓存满则淘汰队首项；
-      "LFU" - 最不经常使用：每个缓存项记录使用频次，命中后频次加 1；未命中时若缓存满则淘汰使用频次最小的项。
-    返回每个 episode 的命中率列表。
+    传统缓存策略仿真：
+      - LRU: 最近最少使用，淘汰最久未访问的项
+      - LFU: 最不经常使用，淘汰访问次数最少的项
+      - FIFO: 先进先出，淘汰最早进入缓存的项
+      - MRU: 最近最常使用，淘汰最近使用的项
+      - Random: 随机淘汰缓存中的某一项
+      - 2Q: 两级队列缓存，先用 FIFO 存储，访问多次后进入 LRU
     """
     hit_ratios = []
     max_steps = env.max_steps  # 与 RL 仿真保持一致
 
     for ep in range(num_episodes):
         env.reset()
-        # 初始化缓存状态及（对于 LFU）使用频率记录
-        if policy == "LFU":
-            cache_state = []  # 缓存中的物品列表
-            frequency = {}  # 记录每个缓存项的使用频次
-        else:  # 默认为 LRU 策略
-            cache_state = []
+        # 初始化缓存状态及访问记录
+        cache_state = []
+        frequency = {}  # LFU 访问频率
+        queue_2q = []  # 2Q FIFO 队列
+        queue_size = env.cache_capacity // 2  # 2Q: FIFO 部分大小
         total_hits = 0
         total_requests = 0
 
         for step in range(max_steps):
-            # 遍历所有车辆，模拟请求
             for vehicle in env.crossroad.vehicles:
                 uid = vehicle.user_id
                 if uid in env.test_user_ratings:
@@ -55,37 +56,57 @@ def simulate_traditional_policy(env, policy, num_episodes):
                 if requested_item in cache_state:
                     total_hits += 1
                     if policy == "LRU":
-                        # 命中后将该项移至末尾表示最近使用
                         cache_state.remove(requested_item)
                         cache_state.append(requested_item)
                     elif policy == "LFU":
                         frequency[requested_item] += 1
+                    elif policy == "MRU":
+                        # MRU 淘汰最近访问的项目，因此每次命中后删除该项
+                        cache_state.remove(requested_item)
+                    elif policy == "2Q":
+                        # 如果在 LRU 阶段被访问，则移动到队列末尾
+                        if requested_item in queue_2q:
+                            queue_2q.remove(requested_item)
+                            queue_2q.append(requested_item)
                 else:
-                    # 未命中：插入缓存，若缓存满则淘汰
-                    if policy == "LRU":
-                        if len(cache_state) < env.cache_capacity:
-                            cache_state.append(requested_item)
-                        else:
-                            # 淘汰最久未使用的（队首）
-                            cache_state.pop(0)
-                            cache_state.append(requested_item)
-                    elif policy == "LFU":
-                        if len(cache_state) < env.cache_capacity:
-                            cache_state.append(requested_item)
+                    # 处理未命中情况
+                    if len(cache_state) < env.cache_capacity:
+                        cache_state.append(requested_item)
+                        if policy == "LFU":
                             frequency[requested_item] = 1
-                        else:
-                            # 淘汰使用频次最小的项
+                        if policy == "2Q":
+                            queue_2q.append(requested_item)
+                    else:
+                        if policy == "LRU":
+                            cache_state.pop(0)
+                        elif policy == "LFU":
                             lfu_item = min(cache_state, key=lambda x: frequency.get(x, 0))
                             cache_state.remove(lfu_item)
                             del frequency[lfu_item]
-                            cache_state.append(requested_item)
+                        elif policy == "FIFO":
+                            cache_state.pop(0)
+                        elif policy == "MRU":
+                            cache_state.pop(-1)
+                        elif policy == "Random":
+                            cache_state.pop(random.randint(0, len(cache_state) - 1))
+                        elif policy == "2Q":
+                            if len(queue_2q) > queue_size:
+                                queue_2q.pop(0)  # FIFO 淘汰
+                            cache_state.pop(0)  # LRU 淘汰
+                        cache_state.append(requested_item)
+                        if policy == "LFU":
                             frequency[requested_item] = 1
-            # 模拟下一步车辆运动、生成与删除
-            env.crossroad.simulate_step(dt=1.0)
+                        if policy == "2Q":
+                            queue_2q.append(requested_item)
+
+            env.crossroad.simulate_step(dt=args.cross_dt)
+
         hit_ratio = total_hits / total_requests if total_requests > 0 else 0
         hit_ratios.append(hit_ratio)
         print(f"传统策略 {policy} - Episode {ep + 1}/{num_episodes}, Hit Ratio: {hit_ratio:.4f}")
+
     return hit_ratios
+
 
 
 #############################################
@@ -93,7 +114,7 @@ def simulate_traditional_policy(env, policy, num_episodes):
 #############################################
 def main():
     # 加载配置、数据与模型（假设相关函数均已定义）
-    from config import get_config
+
     args = get_config()
     device = args.device
 
@@ -144,7 +165,7 @@ def main():
     env_rl = CarCachingEnv(args, crossroad, recommender, norm_adj, num_items, test_user_ratings,
                            cache_capacity=args.cache_capacity, zipf_s=args.zipf_s, topk_candidate=20)
 
-    num_episodes = 200
+    num_episodes = args.episodes
     target_update_freq = 10
 
     #############################################
@@ -152,7 +173,7 @@ def main():
     #############################################
     if args.agent == 'ppo':
         from Agent import PPOAgent
-        agent = PPOAgent(state_dim=env_rl.observation_space.shape[0], action_dim=env_rl.action_space.n,
+        agent = PPOAgent(state_dim=env_rl.observation_space.shape[0], action_dim=env_rl.action_space.n,gamma=args.gamma,
                          device=args.device)
     elif args.agent == 'dqn':
         from Agent import DQNAgent
@@ -169,6 +190,7 @@ def main():
     for episode in range(num_episodes):
         state = env_rl.reset()
         done = False
+        rewarded = False
         total_reward = 0.0
         episode_hit_count = 0
         episode_requests = 0
@@ -176,6 +198,9 @@ def main():
             if args.agent == 'ppo':
                 action, log_prob = agent.select_action(state)
                 next_state, reward, done, info = env_rl.step(action)
+                if not rewarded and episode_hit_count > args.hit_threshold:
+                    rewarded = True
+                    reward += 1000
                 agent.store_transition(state, action, log_prob, reward, done, next_state)
             elif args.agent in ['dqn', 'dsac']:
                 action = agent.select_action(state)
@@ -195,31 +220,33 @@ def main():
         print(f"RL Episode {episode + 1}/{num_episodes}, Total Reward: {total_reward:.4f}, Hit Ratio: {hit_ratio:.4f}")
 
     #############################################
-    # 传统缓存策略仿真：LRU 与 LFU（使用新的环境实例以保证初始化一致）
+    # 传统缓存策略仿真：LRU、LFU、FIFO、MRU、Random、2Q
     #############################################
-    crossroad_lru = Crossroad(width=100, height=100)
-    env_lru = CarCachingEnv(args, crossroad_lru, recommender, norm_adj, num_items, test_user_ratings,
-                            cache_capacity=args.cache_capacity, zipf_s=args.zipf_s, topk_candidate=20)
-    lru_hit_ratios = simulate_traditional_policy(env_lru, policy="LRU", num_episodes=num_episodes)
+    policies = ["LRU", "FIFO", "MRU", "Random", "2Q"]
+    traditional_results = {}
 
-    crossroad_lfu = Crossroad(width=100, height=100)
-    env_lfu = CarCachingEnv(args, crossroad_lfu, recommender, norm_adj, num_items, test_user_ratings,
-                            cache_capacity=args.cache_capacity, zipf_s=args.zipf_s, topk_candidate=20)
-    lfu_hit_ratios = simulate_traditional_policy(env_lfu, policy="LFU", num_episodes=num_episodes)
+    for policy in policies:
+        crossroad_trad = Crossroad(width=100, height=100)
+        env_trad = CarCachingEnv(args, crossroad_trad, recommender, norm_adj, num_items, test_user_ratings,
+                                 cache_capacity=args.cache_capacity, zipf_s=args.zipf_s, topk_candidate=20)
+        traditional_results[policy] = simulate_traditional_policy(env_trad, policy=policy, num_episodes=num_episodes)
 
     #############################################
-    # 绘制对比图：RL vs LRU vs LFU
+    # 绘制对比图：RL vs 传统策略（LRU、LFU、FIFO、MRU、Random、2Q）
     #############################################
-    plt.figure(figsize=(8, 5))
-    plt.plot(rl_hit_ratios, label="RL Agent")
-    plt.plot(lru_hit_ratios, label="LRU")
-    plt.plot(lfu_hit_ratios, label="LFU")
+    plt.figure(figsize=(10, 6))
+    plt.plot(rl_hit_ratios, label="RL Agent", linewidth=2)
+
+    for policy, hit_ratios in traditional_results.items():
+        plt.plot(hit_ratios, label=policy)
+
     plt.xlabel("Episode")
     plt.ylabel("Hit Ratio")
-    plt.title("缓存策略对比 (Hit Ratio over Episodes)")
+    plt.title("policies comparison (Hit Ratio over Episodes)")
     plt.legend()
-    plt.savefig("caching_policy_comparison.png")
+    plt.savefig("caching_policy_comparison_" + str(datetime.datetime.now()) + ".png")
     plt.show()
+
 
 
 if __name__ == '__main__':
