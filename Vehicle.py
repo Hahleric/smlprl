@@ -1,25 +1,20 @@
-
 import numpy as np
 import torch as t
 
-from config import get_config
-
-# 假设已有的 Vehicle, RSU, Crossroad 类（参考前面代码）
-# Vehicle 类示例（修正 generate_request 中 interest_vector 的引用）
-args = get_config()
 class Vehicle:
-    def __init__(self, user_id, position, speed, interest_vector):
+    def __init__(self, user_id, position, speed, interest_vector, request_frequency):
         """
         :param user_id: 车辆或用户的唯一标识
         :param position: 车辆初始位置（二维坐标）
         :param speed: 车辆速度向量（二维）
-        :param interest_vector: 兴趣向量（例如代表请求电影的概率分布，维度与候选集合长度一致）
+        :param interest_vector: 兴趣向量（例如代表请求电影的概率分布）
+        :param request_frequency: 车辆请求内容的频率
         """
         self.user_id = user_id
         self.position = np.array(position, dtype=float)
         self.speed = np.array(speed, dtype=float)
         self.interest_vector = np.array(interest_vector, dtype=float)
-
+        self.request_frequency = request_frequency
 
     def update_position(self, dt=1):
         self.position += self.speed * dt
@@ -28,10 +23,10 @@ class Vehicle:
         distance = np.linalg.norm(self.position - rsu_position)
         bandwidth = B0 * np.exp(-alpha * distance) + np.random.normal(0, 0.5)
         return max(bandwidth, 0)
+
     def get_position(self):
         return self.position
 
-# RSU 类（用于带宽计算，不含缓存状态，缓存由环境管理）
 class RSU:
     def __init__(self, position, B0=10.0, alpha=0.1):
         self.position = np.array(position)
@@ -44,9 +39,8 @@ class RSU:
         bandwidth = self.B0 * np.exp(-self.alpha * distance) + np.random.normal(0, 0.5)
         return max(bandwidth, 0.0)
 
-# Crossroad 类（管理车辆生成、更新、删除等）
 class Crossroad:
-    def __init__(self, width, height, rsu_position=None, B0=10.0, alpha=0.1, spawn_rate=args.spawn_rate, user_interest_dict=None):
+    def __init__(self, width, height, rsu_position=None, B0=10.0, alpha=0.1, spawn_rate=1.2, user_interest_dict=None, base_request_frequency=1.0):
         self.width = width
         self.height = height
         if rsu_position is None:
@@ -55,13 +49,12 @@ class Crossroad:
         self.vehicles = []
         self.spawn_rate = spawn_rate  # 每个时间步生成新车辆的期望数量
         self.vehicle_counter = 0
-        # 保存预处理得到的用户兴趣向量字典
         self.user_interest_dict = user_interest_dict
         self.max_distance = np.linalg.norm([width, height])
+        self.base_request_frequency = base_request_frequency
 
-    def generate_vehicle(self, user_id=None, position=None, speed=None, interest_vector=None):
+    def generate_vehicle(self, user_id=None, position=None, speed=None, interest_vector=None, request_frequency=None):
         if user_id is None:
-            # 如果提供了兴趣字典，则随机选择一个用户ID；否则使用内部计数器
             if self.user_interest_dict is not None:
                 user_id = np.random.choice(list(self.user_interest_dict.keys()))
             else:
@@ -70,19 +63,19 @@ class Crossroad:
                 self.vehicle_counter = self.vehicle_counter % 6040
 
         if position is None:
-            # 随机生成在区域内部的位置
             position = np.random.uniform([0, 0], [self.width, self.height])
         if speed is None:
             speed = np.random.uniform(-1, 1, size=2)
         if interest_vector is None:
-            # 如果已经提供了预处理的兴趣字典，则根据 user_id 获取 interest_vector
             if self.user_interest_dict is not None and user_id in self.user_interest_dict:
                 interest_vector = self.user_interest_dict[user_id]
             else:
-                # 否则随机生成（假设候选集合大小为10）
                 interest_vector = np.random.rand(10)
                 interest_vector /= interest_vector.sum()
-        vehicle = Vehicle(user_id, position, speed, interest_vector)
+        if request_frequency is None:
+            request_frequency = self.base_request_frequency
+        from Vehicle import Vehicle  # 避免循环引用（如果在单个文件中可忽略此行）
+        vehicle = Vehicle(user_id, position, speed, interest_vector, request_frequency)
         self.vehicles.append(vehicle)
         return vehicle
 
@@ -131,6 +124,5 @@ class Crossroad:
         self.update_vehicles(dt)
         self.remove_exited_vehicles()
         self.spawn_new_vehicles()
-        # 返回车辆的带宽信息（用于调试或状态构造）
         bandwidths = {vehicle.user_id: vehicle.get_bandwidth(self.rsu.position) for vehicle in self.vehicles}
         return bandwidths

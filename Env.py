@@ -1,9 +1,10 @@
+from typing import Optional, Union, List
 import gym
 from gym import spaces
 import itertools
 import numpy as np
 import torch
-from tqdm import tqdm
+from gym.core import RenderFrame
 import math
 
 def sample_request_item(pos_items, pos_ratings, zipf_s=1.0):
@@ -21,11 +22,12 @@ def sample_request_item(pos_items, pos_ratings, zipf_s=1.0):
 
 class CarCachingEnv(gym.Env):
     """
-    模拟路口中车辆、RSU 与缓存决策过程的环境。环境状态中除了包含车辆基本信息和缓存状态外，
-    还加入了 LightGCN 在当前时刻对候选缓存集合的预测得分，供 RL 代理参考。
+    模拟路口中车辆、RSU 与缓存决策过程的环境。
+    状态包括车辆基本信息、缓存状态、候选集合得分以及新增的平均延迟信息。
     """
     def __init__(self, args, crossroad, recommender, norm_adj, num_items,
-                 test_user_ratings, cache_capacity=3, zipf_s=0.8, topk_candidate=20):
+                 test_user_ratings, cache_capacity=3, zipf_s=1.0, topk_candidate=20,
+                 use_recommendation_boost=True):
         super(CarCachingEnv, self).__init__()
         self.args = args
         self.crossroad = crossroad
@@ -36,30 +38,31 @@ class CarCachingEnv(gym.Env):
         self.cache_capacity = cache_capacity
         self.zipf_s = zipf_s
         self.topk_candidate = topk_candidate
-
-        # 初始时候候选集合和动作空间暂时为空，待 reset 时更新
-        self.cache_candidate_set = None
-        self.cache_candidate_scores = None  # 新增变量，用于存储 LightGCN 得分
-        self.action_list = None
+        self.use_recommendation_boost = use_recommendation_boost
 
         # 状态空间：车辆平均位置(2) + 平均速度(2) + 平均带宽(1) + 当前缓存状态(cache_capacity)
-        # + 当前候选集合的得分(topk_candidate)
-        self.feature_dim = 2 + 2 + 1 + self.cache_capacity + self.topk_candidate
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.feature_dim,), dtype=np.float32)
+        # + 当前候选集合的得分(topk_candidate) + 平均延迟(1)
+        self.feature_dim = 2 + 2 + 1 + self.cache_capacity + self.topk_candidate + 1
+        self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(self.feature_dim,), dtype=np.float32)
         self.action_dim_init = math.comb(self.topk_candidate, self.cache_capacity)
         self.action_space = spaces.Discrete(self.action_dim_init)
 
-        self.current_cache = None  # 当前缓存配置
-        self.hit_reward = 1.0
-        self.miss_penalty = -1.0
-        self.num_requests_per_vehicle = 1
-        self.max_steps = args.max_steps
+        self.current_cache = None  # 当前缓存配置（记录候选集合索引组合）
+        self.cache_candidate_set = None
+        self.cache_candidate_scores = None  # 保存 LightGCN 得分
+        self.action_list = None
+
+        # 新增属性用于延迟反馈与缓存更新惩罚
+        self.last_avg_delay = 0.0
+        self.prev_cache = None
+
         self.current_step = 0
+        self.max_steps = args.max_steps
 
     def update_candidate_set(self):
         """
-        利用 LightGCN 根据当前环境中车辆用户的预测，计算所有物品得分，
-        并选取 topk_candidate 个物品作为候选缓存集合，同时保存对应的得分。
+        利用 LightGCN 预测用户对物品的评分，选取 topk_candidate 个物品作为候选缓存集合，
+        并更新所有可能的缓存组合动作空间。
         """
         user_ids = [v.user_id for v in self.crossroad.vehicles]
         if len(user_ids) == 0:
@@ -69,7 +72,6 @@ class CarCachingEnv(gym.Env):
             user_tensor = torch.tensor(user_ids, dtype=torch.long).to(device=self.args.device)
             with torch.no_grad():
                 user_embeds, item_embeds = self.recommender(self.norm_adj)
-                # 若设备为 mps，则在 CPU 上进行索引操作
                 if self.args.device == "mps":
                     user_tensor_cpu = user_tensor.cpu()
                     user_embeds_cpu = user_embeds.cpu()
@@ -89,6 +91,7 @@ class CarCachingEnv(gym.Env):
         self.action_space = spaces.Discrete(self.num_actions)
         # 默认初始缓存选择第一个组合
         self.current_cache = self.action_list[0]
+        self.prev_cache = self.current_cache
 
     def reset(self):
         self.crossroad.vehicles = []
@@ -96,57 +99,80 @@ class CarCachingEnv(gym.Env):
             self.crossroad.generate_vehicle(user_id=i)
         self.update_candidate_set()
         self.current_step = 0
-        return self._get_state()
+        self.last_avg_delay = 0.0
+        obs = self._get_state()
+        return obs
 
     def step(self, action):
-        # 每一步更新候选集合
-        if self.current_step % 2 == 0:
-            self.update_candidate_set()
+        previous_cache = self.current_cache
         self.current_cache = self.action_list[action]
         cache_files = [int(self.cache_candidate_set[idx]) for idx in self.current_cache]
+
         total_reward = 0.0
+        total_delay = 0.0
         hit_count = 0
-        with torch.no_grad():
-            user_embeds, item_embeds = self.recommender(self.norm_adj)
-        hit = False
-        for vehicle in tqdm(self.crossroad.vehicles, desc="Processing vehicles", leave=False):
-            uid = vehicle.user_id
-            for _ in range(self.num_requests_per_vehicle):
+        total_requests = 0
+
+        # 遍历每辆车，根据它的请求频率发起请求
+        for vehicle in self.crossroad.vehicles:
+            num_requests = int(vehicle.request_frequency)
+            for _ in range(num_requests):
+                uid = vehicle.user_id
                 if uid in self.test_user_ratings:
                     pos_items, pos_ratings = self.test_user_ratings[uid]
                 else:
                     pos_items, pos_ratings = [], []
+
+                # 如果启用推荐提升，则提高候选集合中物品的权重
+                if self.use_recommendation_boost and self.cache_candidate_set is not None:
+                    boost = self.args.recommendation_boost
+                    # 对于 pos_items 中出现在候选集合的物品，提升其评分
+                    pos_ratings = [r * boost if item in self.cache_candidate_set else r
+                                   for item, r in zip(pos_items, pos_ratings)]
+
                 requested_item = sample_request_item(pos_items, pos_ratings, self.zipf_s)
                 if requested_item == -1:
                     continue
 
                 distance = np.linalg.norm(vehicle.position - self.crossroad.rsu.position)
-                normalized_distance = distance / self.crossroad.max_distance  # 归一化距离
-                # 此处不考虑传输延迟，简单采用命中给正奖励，未命中给负奖励
-                if requested_item in cache_files:
-                    qoe_gain = 1.0 - normalized_distance
-                    # 放大奖励信号
-                    total_reward += (5 + qoe_gain) * 50 * hit_count  # 例如乘以 10
-                    hit_count += 1
-                else:
-                    # 未命中，给予轻微惩罚
-                    total_reward -= 20
+                normalized_distance = distance / self.crossroad.max_distance
 
-        num_total = self.num_requests_per_vehicle * len(self.crossroad.vehicles)
-        avg_reward = total_reward / num_total if num_total > 0 else 0.0
+                if requested_item in cache_files:
+                    delay = self.args.base_delay - self.args.hit_delay_reduction * (1 - normalized_distance)
+                    reward_request = self.args.hit_reward - self.args.delay_weight * delay
+                    hit_count += 1
+                    vehicle.request_frequency = min(vehicle.request_frequency + self.args.request_frequency_increment,
+                                                    self.args.max_request_frequency)
+                else:
+                    delay = self.args.base_delay + self.args.miss_delay_penalty
+                    reward_request = self.args.miss_penalty - self.args.delay_weight * delay
+                    vehicle.request_frequency = max(vehicle.request_frequency - self.args.request_frequency_decay,
+                                                    self.args.base_request_frequency)
+                total_reward += reward_request
+                total_delay += delay
+                total_requests += 1
+
+        if previous_cache != self.current_cache:
+            total_reward -= self.args.cache_update_cost
+
+        avg_delay = total_delay / total_requests if total_requests > 0 else 0.0
+        avg_reward = total_reward / total_requests if total_requests > 0 else 0.0
 
         self.crossroad.simulate_step(dt=self.args.cross_dt)
+        self.update_candidate_set()
         self.current_step += 1
+        self.last_avg_delay = avg_delay
         next_state = self._get_state()
         done = (self.current_step >= self.max_steps)
         info = {
-            "cache_hits": hit_count,
-            "total_requests": num_total,
-            "hit_rate": hit_count / num_total if num_total > 0 else 0.0
+            "cache_hits": int(hit_count),
+            "total_requests": int(total_requests),
+            "hit_rate": float(hit_count / total_requests if total_requests > 0 else 0.0),
+            "avg_delay": avg_delay
         }
         if self.current_step % 50 == 0:
-            print(f"Step {self.current_step}, Avg Reward: {avg_reward:.4f}, "
-                  f"Hit Rate: {info['hit_rate']:.4f}, Cache Hits: {hit_count}/{num_total}")
+            print(f"Step {self.current_step}, Avg Reward: {avg_reward:.4f}, Hit Rate: {info['hit_rate']:.4f}, "
+                  f"Avg Delay: {avg_delay:.4f}, Cache Hits: {hit_count}/{total_requests}")
         return next_state, avg_reward, done, info
 
     def _get_state(self):
@@ -154,16 +180,40 @@ class CarCachingEnv(gym.Env):
             positions = np.array([v.position for v in self.crossroad.vehicles])
             speeds = np.array([v.speed for v in self.crossroad.vehicles])
             bandwidths = np.array([v.get_bandwidth(self.crossroad.rsu.position) for v in self.crossroad.vehicles])
-            avg_position = positions.mean(axis=0)
-            avg_speed = speeds.mean(axis=0)
-            avg_bandwidth = np.array([bandwidths.mean()])
+
+            avg_position = positions.mean(axis=0) if positions.size > 0 else np.zeros(2)
+            avg_speed = speeds.mean(axis=0) if speeds.size > 0 else np.zeros(2)
+            avg_bandwidth = np.array([bandwidths.mean()]) if bandwidths.size > 0 else np.zeros(1)
         else:
             avg_position = np.zeros(2)
             avg_speed = np.zeros(2)
             avg_bandwidth = np.zeros(1)
-        # 当前缓存状态：候选集合中的物品ID归一化（除以 num_items）
-        cache_state = np.array([self.cache_candidate_set[idx] / self.num_items for idx in self.current_cache])
-        # 新增：加入当前 LightGCN 计算的候选得分（直接使用 self.cache_candidate_scores）
-        candidate_scores = np.array(self.cache_candidate_scores)  # shape: (topk_candidate,)
-        state = np.concatenate([avg_position, avg_speed, avg_bandwidth, cache_state, candidate_scores])
-        return state.astype(np.float32)
+
+        # Normalize position and speed values
+        avg_position = avg_position / np.linalg.norm(avg_position) if np.linalg.norm(avg_position) > 0 else avg_position
+        avg_speed = avg_speed / np.linalg.norm(avg_speed) if np.linalg.norm(avg_speed) > 0 else avg_speed
+
+        # Normalize缓存状态（假设 num_items 很大）
+        cache_state = np.array([self.cache_candidate_set[idx] / self.args.num_items for idx in self.current_cache])
+
+        # Normalize candidate scores
+        candidate_scores = np.array(self.cache_candidate_scores)
+        if candidate_scores.max() > 1:
+            candidate_scores = candidate_scores / candidate_scores.max()
+
+        # 平均延迟作为状态的最后一项（可以进一步归一化）
+        avg_delay_feature = np.array([self.last_avg_delay])
+
+        # 确保所有数组均为 1D
+        avg_position = avg_position.flatten()
+        avg_speed = avg_speed.flatten()
+        avg_bandwidth = avg_bandwidth.flatten()
+        cache_state = cache_state.flatten()
+        candidate_scores = candidate_scores.flatten()
+        avg_delay_feature = avg_delay_feature.flatten()
+
+        # 拼接并裁剪到 [-1, 1]
+        state = np.concatenate([avg_position, avg_speed, avg_bandwidth, cache_state, candidate_scores, avg_delay_feature], axis=0)
+        state = np.clip(state, -1.0, 1.0).astype(np.float32)
+
+        return state

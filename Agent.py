@@ -110,53 +110,86 @@ class ResidualBlock(nn.Module):
         out = out + residual
         return F.relu(out)
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributions import Categorical
 
-# 改进版 Actor 网络（带残差块）
+# 假设 ResidualBlock 已经定义，如下是一个简单示例：
+class ResidualBlock(nn.Module):
+    def __init__(self, dim):
+        super(ResidualBlock, self).__init__()
+        self.fc1 = nn.Linear(dim, dim)
+        self.ln = nn.LayerNorm(dim)
+        self.fc2 = nn.Linear(dim, dim)
+
+    def forward(self, x):
+        residual = x
+        out = F.relu(self.ln(self.fc1(x)))
+        out = self.fc2(out)
+        out += residual
+        return F.relu(out)
+
+# 改进版 Actor 网络（带残差和 LSTM）
 class Actor(nn.Module):
     def __init__(self, state_dim, action_dim):
         super(Actor, self).__init__()
         self.fc0 = nn.Linear(state_dim, 256)
         self.ln0 = nn.LayerNorm(256)
+        # LSTM层，输入和输出均为256维
+        self.lstm = nn.LSTM(256, 256, batch_first=True)
         # 使用两个残差块
         self.res_block1 = ResidualBlock(256)
         self.res_block2 = ResidualBlock(256)
         self.dropout = nn.Dropout(0.2)
         self.fc_out = nn.Linear(256, action_dim)  # 输出 logits
 
-    def forward(self, x):
-        x = F.relu(self.ln0(self.fc0(x)))
+    def forward(self, x, hidden_state=None):
+        # x 的形状可以是 (batch, state_dim) 或 (batch, seq_len, state_dim)
+        x = self.fc0(x)
+        x = F.relu(self.ln0(x))
         x = self.dropout(x)
+        # 如果输入为单步，则扩展时间维度
+        if x.dim() == 2:
+            x = x.unsqueeze(1)  # 形状 (batch, 1, 256)
+        lstm_out, new_hidden_state = self.lstm(x, hidden_state)
+        # 取最后一个时间步的输出
+        x = lstm_out[:, -1, :]  # 形状 (batch, 256)
         x = self.res_block1(x)
         x = self.dropout(x)
         x = self.res_block2(x)
         x = self.dropout(x)
         logits = self.fc_out(x)
-        return logits
+        return logits, new_hidden_state
 
-
-# 改进版 Critic 网络（带残差块）
+# 改进版 Critic 网络（带残差和 LSTM）
 class Critic(nn.Module):
     def __init__(self, state_dim):
         super(Critic, self).__init__()
         self.fc0 = nn.Linear(state_dim, 256)
         self.ln0 = nn.LayerNorm(256)
+        self.lstm = nn.LSTM(256, 256, batch_first=True)
         self.res_block1 = ResidualBlock(256)
         self.res_block2 = ResidualBlock(256)
         self.dropout = nn.Dropout(0.2)
         self.fc_out = nn.Linear(256, 1)
 
-    def forward(self, x):
-        x = F.relu(self.ln0(self.fc0(x)))
+    def forward(self, x, hidden_state=None):
+        x = self.fc0(x)
+        x = F.relu(self.ln0(x))
         x = self.dropout(x)
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        lstm_out, new_hidden_state = self.lstm(x, hidden_state)
+        x = lstm_out[:, -1, :]
         x = self.res_block1(x)
         x = self.dropout(x)
         x = self.res_block2(x)
         x = self.dropout(x)
         value = self.fc_out(x)
-        return value
+        return value, new_hidden_state
 
-
-# PPO Agent 实现
+# PPO Agent 实现（修改 select_action 接收单步状态，内部将单步状态扩展为序列）
 class PPOAgent:
     def __init__(self, state_dim, action_dim, actor_lr=1e-4, critic_lr=1e-3, gamma=0.99,
                  eps_clip=0.2, K_epochs=4, entropy_coef=0.01, device="cpu"):
@@ -168,25 +201,29 @@ class PPOAgent:
         self.entropy_coef = entropy_coef
         self.device = torch.device(device)
 
-        # 初始化 Actor 与 Critic 网络
+        # 初始化 Actor 与 Critic 网络（带 LSTM）
         self.actor = Actor(state_dim, action_dim).to(self.device)
         self.critic = Critic(state_dim).to(self.device)
         # 使用同一个优化器更新 Actor 与 Critic 参数
-        self.optimizer = optim.Adam(list(self.actor.parameters()) + list(self.critic.parameters()),
+        self.optimizer = torch.optim.Adam(list(self.actor.parameters()) + list(self.critic.parameters()),
                                     lr=actor_lr)
-        # 用于存储当前 episode 的经验（state, action, logprob, reward, done, next_state）
         self.memory = []
 
-    def select_action(self, state):
+    def select_action(self, state, hidden_state=None):
         """
-        根据当前 state 采样动作，并返回动作以及该动作的 log 概率
+        根据当前 state 采样动作，并返回动作及该动作的 log 概率。
+        state 为单步输入，形状 (state_dim,)，内部扩展为 (1, state_dim)。
+        hidden_state 可选，便于维持 LSTM 隐藏状态。
         """
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-        logits = self.actor(state_tensor)
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)  # (1, state_dim)
+        # 扩展时间维度为1： (1, 1, state_dim)
+        state_tensor = state_tensor.unsqueeze(1)
+        logits, new_hidden_state = self.actor(state_tensor, hidden_state)
+        # logits 形状为 (1, action_dim)
         dist = Categorical(logits=logits)
         action = dist.sample()
         logprob = dist.log_prob(action)
-        return int(action.item()), logprob.item()
+        return int(action.item()), logprob.item(), new_hidden_state
 
     def store_transition(self, state, action, logprob, reward, done, next_state):
         self.memory.append((state, action, logprob, reward, done, next_state))
@@ -195,7 +232,7 @@ class PPOAgent:
         self.memory = []
 
     def update(self):
-        # 将 memory 转换为 tensor
+        # 转换 memory 中数据为 tensors
         states = torch.FloatTensor([trans[0] for trans in self.memory]).to(self.device)
         actions = torch.LongTensor([trans[1] for trans in self.memory]).to(self.device)
         old_logprobs = torch.FloatTensor([trans[2] for trans in self.memory]).to(self.device)
@@ -216,18 +253,16 @@ class PPOAgent:
         if discounted_rewards.std() > 1e-5:
             discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5)
 
-        # 多个 epoch 更新 PPO
         for _ in range(self.K_epochs):
-            logits = self.actor(states)
+            logits, _ = self.actor(states.unsqueeze(1))  # 如果 states 为 (batch, state_dim)，扩展为 (batch, 1, state_dim)
             dist = Categorical(logits=logits)
             new_logprobs = dist.log_prob(actions)
             entropy = dist.entropy()
 
-            # Critic 评估状态价值
-            state_values = self.critic(states).squeeze()
+            state_values, _ = self.critic(states.unsqueeze(1))
+            state_values = state_values.squeeze()
             advantages = discounted_rewards - state_values.detach()
 
-            # PPO 目标函数，采用 clip 策略
             ratios = torch.exp(new_logprobs - old_logprobs)
             surr1 = ratios * advantages
             surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
