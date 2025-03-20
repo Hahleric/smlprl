@@ -1,6 +1,7 @@
 import numpy as np
 import torch as t
-
+from config import get_config
+args = get_config()
 class Vehicle:
     def __init__(self, user_id, position, speed, interest_vector, request_frequency):
         """
@@ -115,10 +116,18 @@ class Crossroad:
     def spawn_new_vehicles(self):
         num_to_spawn = int(self.spawn_rate)
         for _ in range(num_to_spawn):
-            self.spawn_vehicle_from_edge()
+            if args.use_gnn:
+                if len(self.vehicles) < args.gnn_max_vehicles:
+                    self.spawn_vehicle_from_edge()
+            else:
+                self.spawn_vehicle_from_edge()
         remainder = self.spawn_rate - num_to_spawn
         if np.random.rand() < remainder:
-            self.spawn_vehicle_from_edge()
+            if args.use_gnn:
+                if len(self.vehicles) < args.gnn_max_vehicles:
+                    self.spawn_vehicle_from_edge()
+            else:
+                self.spawn_vehicle_from_edge()
 
     def simulate_step(self, dt=1.0):
         self.update_vehicles(dt)

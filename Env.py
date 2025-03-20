@@ -7,6 +7,10 @@ import torch
 from gym.core import RenderFrame
 import math
 
+from gym.spaces import Dict, Box
+from matplotlib import pyplot as plt
+
+
 def sample_request_item(pos_items, pos_ratings, zipf_s=1.0):
     if len(pos_items) == 0:
         return -1
@@ -29,6 +33,8 @@ class CarCachingEnv(gym.Env):
                  test_user_ratings, cache_capacity=3, zipf_s=1.0, topk_candidate=20,
                  use_recommendation_boost=True):
         super(CarCachingEnv, self).__init__()
+        self.last_info = {}
+        self.fig, self.ax = None, None
         self.args = args
         self.crossroad = crossroad
         self.recommender = recommender    # 训练好的 LightGCN 模型
@@ -217,3 +223,156 @@ class CarCachingEnv(gym.Env):
         state = np.clip(state, -1.0, 1.0).astype(np.float32)
 
         return state
+
+    def render(self, render_mode='human'):
+        # 如果没有 fig 则新建
+        if self.fig is None or self.ax is None:
+            self.fig, self.ax = plt.subplots(figsize=(6,6))
+        self.ax.clear()
+        # 绘制环境（假设 RSU 位置、车辆位置等信息存在）
+        rsu_pos = self.crossroad.rsu.position
+        self.ax.plot(rsu_pos[0], rsu_pos[1], 'ro', markersize=10, label='RSU')
+        for vehicle in self.crossroad.vehicles:
+            pos = vehicle.position
+            self.ax.plot(pos[0], pos[1], 'bo', markersize=5)
+        self.ax.set_xlim(0, self.crossroad.width)
+        self.ax.set_ylim(0, self.crossroad.height)
+        self.ax.set_title("CarCachingEnv Render")
+        self.ax.legend()
+
+        # 在图中叠加统计信息
+        if self.last_info:
+            # 假设 info 中包含 'cache_hits', 'total_requests', 'hit_rate', 'avg_delay'
+            text = (f"Cache Hit Ratio: {self.last_info.get('hit_rate', 0):.2f}\n"
+                    f"Cache Hits: {self.last_info.get('cache_hits', 0)}/{self.last_info.get('total_requests', 0)}\n"
+                    f"Avg Delay: {self.last_info.get('avg_delay', 0):.2f}")
+            self.ax.text(0.05, 0.95, text, transform=self.ax.transAxes,
+                         fontsize=12, verticalalignment='top',
+                         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        self.fig.canvas.draw()
+        # 返回 RGB 数组（可选）
+        image = np.frombuffer(self.fig.canvas.tostring_rgb(), dtype=np.uint8)
+        image = image.reshape(self.fig.canvas.get_width_height()[::-1] + (3,))
+        return image
+
+def normalize_node_features(node_features, env):
+    """
+    对节点特征进行归一化：
+      - 对位置（前两列）和速度（第3、4列）分别归一化；
+      - 带宽直接 clip 到 [-1,1]；
+      - 对 request_frequency（第6列），使用 env.args 中 base_request_frequency 与 max_request_frequency 归一化到 [-1,1]；
+      - 第7列保持不变。
+    """
+    normed = np.copy(node_features)
+    for i in range(normed.shape[0]):
+        # 归一化位置
+        pos = normed[i, 0:2]
+        norm = np.linalg.norm(pos)
+        if norm > 0:
+            normed[i, 0:2] = pos / norm
+        # 归一化速度
+        sp = normed[i, 2:4]
+        norm_sp = np.linalg.norm(sp)
+        if norm_sp > 0:
+            normed[i, 2:4] = sp / norm_sp
+        # 带宽 clip
+        normed[i, 4] = np.clip(normed[i, 4], -1.0, 1.0)
+        # 归一化 request_frequency（第6列）
+        base_rf = env.args.base_request_frequency
+        max_rf = env.args.max_request_frequency if hasattr(env.args, "max_request_frequency") else 10.0
+        normed[i, 5] = 2 * (normed[i, 5] - base_rf) / (max_rf - base_rf) - 1
+        # 常数列保持不变
+    normed = np.clip(normed, -1.0, 1.0)
+    return normed
+
+class GNNCarCachingEnv(CarCachingEnv):
+    def __init__(self, *args, **kwargs):
+        super(GNNCarCachingEnv, self).__init__(*args, **kwargs)
+        # 固定最大节点数：RSU + 最大车辆数（由配置参数 gnn_max_vehicles 指定）
+        max_nodes = self.args.gnn_max_vehicles + 1
+        node_feature_dim = 7
+        # 固定最大边数：对于星型拓扑，最大边数 = 自连接 max_nodes + 2*(max_nodes - 1) = 3*max_nodes - 2
+        max_edges = 3 * max_nodes - 2
+        from gym.spaces import Dict, Box
+        self.observation_space = Dict({
+            "node_features": Box(low=-1.0, high=1.0, shape=(max_nodes, node_feature_dim), dtype=np.float32),
+            "edge_index": Box(low=-1, high=max_nodes, shape=(2, max_edges), dtype=np.int64),
+            "node_mask": Box(low=0.0, high=1.0, shape=(max_nodes,), dtype=np.float32)
+        })
+        out_dim = 16  # 输出的节点嵌入维度
+        self.gnn_state_dim = out_dim
+
+    def _get_state_gnn(self):
+        """
+        构建图：节点包括 RSU 与所有车辆
+          - 节点特征：车辆节点 [x, y, vx, vy, 带宽, request_frequency, 1]；RSU节点 [x, y, 0, 0, avg_bandwidth, 0, 1]
+          - 使用 normalize_node_features 对节点特征归一化
+          - 对节点特征进行 padding，使得形状固定为 (max_nodes, 7)，同时生成 node_mask
+          - 边连接：基于实际节点构造边（自连接 + RSU 与车辆双向连边），实际边数 = 3*n_actual - 2，
+            然后对 edge_index 进行 padding 至 (2, max_edges)，填充值 -1 表示无效边
+        返回字典：{"node_features": Tensor, "edge_index": Tensor, "node_mask": Tensor}
+        """
+        device = self.args.device
+        vehicles = self.crossroad.vehicles
+        n_actual = len(vehicles) + 1  # 实际节点数：RSU + 实际车辆数
+        max_nodes = self.args.gnn_max_vehicles + 1
+
+        # RSU 节点特征
+        rsu_pos = self.crossroad.rsu.position
+        if vehicles:
+            avg_bw = np.mean([v.get_bandwidth(self.crossroad.rsu.position) for v in vehicles])
+        else:
+            avg_bw = 0.0
+        rsu_feature = np.array([rsu_pos[0], rsu_pos[1], 0.0, 0.0, avg_bw, 0.0, 1.0], dtype=np.float32)
+        # 车辆节点特征
+        vehicle_features = []
+        for v in vehicles:
+            bw = v.get_bandwidth(self.crossroad.rsu.position)
+            feat = np.concatenate([v.position, v.speed, [bw], [v.request_frequency], [1.0]]).astype(np.float32)
+            vehicle_features.append(feat)
+        if vehicle_features:
+            vehicle_features = np.stack(vehicle_features, axis=0)
+        else:
+            vehicle_features = np.empty((0, 7), dtype=np.float32)
+        # 拼接 RSU 与车辆节点 -> shape: (n_actual, 7)
+        node_features = np.concatenate([rsu_feature.reshape(1, -1), vehicle_features], axis=0)
+        node_features = normalize_node_features(node_features, self)
+        # Padding node_features 到 (max_nodes, 7)
+        if n_actual < max_nodes:
+            pad = np.zeros((max_nodes - n_actual, node_features.shape[1]), dtype=np.float32)
+            node_features = np.concatenate([node_features, pad], axis=0)
+        else:
+            node_features = node_features[:max_nodes, :]
+        node_features = torch.FloatTensor(node_features).to(device)
+
+        # 生成 node_mask: 前 n_actual 个为1，其余为0，形状 (max_nodes,)
+        node_mask = np.zeros(max_nodes, dtype=np.float32)
+        node_mask[:n_actual] = 1.0
+        node_mask = torch.FloatTensor(node_mask).to(device)
+
+        # 构造 edge_index：先构造实际节点的边
+        edge_index_list = []
+        # 自连接：每个实际节点连边
+        for i in range(n_actual):
+            edge_index_list.append([i, i])
+        # RSU 与每个车辆双向连边（RSU索引=0）
+        for i in range(1, n_actual):
+            edge_index_list.append([0, i])
+            edge_index_list.append([i, 0])
+
+        edge_index_arr = np.array(edge_index_list).T  # shape: (2, actual_edges)
+        actual_edges = edge_index_arr.shape[1]
+        max_edges = 3 * max_nodes - 2
+        if actual_edges < max_edges:
+            pad = -1 * np.ones((2, max_edges - actual_edges), dtype=np.int64)
+            edge_index_arr = np.concatenate([edge_index_arr, pad], axis=1)
+        else:
+            edge_index_arr = edge_index_arr[:, :max_edges]
+        edge_index = torch.LongTensor(edge_index_arr).to(device)
+        return {"node_features": node_features, "edge_index": edge_index, "node_mask": node_mask}
+
+    def _get_state(self):
+        if self.args.use_gnn:
+            return self._get_state_gnn()
+        else:
+            return super(GNNCarCachingEnv, self)._get_state()

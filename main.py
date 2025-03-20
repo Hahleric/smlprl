@@ -14,6 +14,7 @@ import gym
 import datetime
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from VideoCallback import VideoRecordingCallback
 
 from config import get_config
 args = get_config()
@@ -64,12 +65,17 @@ else:
 
 #############################################
 # 初始化车联网缓存环境（RL 环境）
-from Env import CarCachingEnv, sample_request_item
+from Env import CarCachingEnv, sample_request_item, GNNCarCachingEnv
 
 # 使用 RL 环境时，使用 args.rl_zipf_s
-env_rl = CarCachingEnv(args, crossroad, recommender, norm_adj, num_items, test_user_ratings,
-                         cache_capacity=args.cache_capacity, zipf_s=args.rl_zipf_s, topk_candidate=20,
-                         use_recommendation_boost=True)
+if args.use_gnn:
+    env_rl = GNNCarCachingEnv(args, crossroad, recommender, norm_adj, num_items, test_user_ratings,
+                              cache_capacity=args.cache_capacity, zipf_s=args.rl_zipf_s, topk_candidate=20,
+                              use_recommendation_boost=True)
+else:
+    env_rl = CarCachingEnv(args, crossroad, recommender, norm_adj, num_items, test_user_ratings,
+                           cache_capacity=args.cache_capacity, zipf_s=args.rl_zipf_s, topk_candidate=20,
+                           use_recommendation_boost=True)
 num_episodes = args.episodes
 target_update_freq = 10
 
@@ -77,11 +83,18 @@ target_update_freq = 10
 # RL 代理训练（以 PPO 为例）
 if args.use_sbl:
     from stable_baselines3 import PPO
-    ppo_model = PPO("MlpPolicy", env_rl, verbose=2, device=args.sbl_device, n_steps=args.max_steps)
+    if args.use_gnn:
+        from gnn_agent import TorchGeoGNNPPOPolicy
+
+        ppo_model = PPO(TorchGeoGNNPPOPolicy, env_rl, verbose=1, device=args.sbl_device, n_steps=args.max_steps,
+                        policy_kwargs=dict(conv_type=args.gnn_conv_type))
+    else:
+        ppo_model = PPO("MlpPolicy", env_rl, verbose=1, device=args.sbl_device, n_steps=args.max_steps)
+
     if not args.use_saved_rl:
-        ppo_model.learn(total_timesteps=10240, progress_bar=True)
-        ppo_model.save("ppo_model")
-    loaded_model = PPO.load("ppo_model.zip")
+        ppo_model.learn(total_timesteps=20480, progress_bar=True)
+        ppo_model.save("ppo_model" + args.gnn_conv_type)
+    loaded_model = PPO.load("ppo_model" + args.gnn_conv_type +".zip")
     obs = env_rl.reset()
     rl_hit_ratios = []
     for _ in tqdm(range(args.episodes)):
@@ -97,17 +110,17 @@ if args.use_sbl:
         rl_hit_ratios.append(hits / requests if requests > 0 else 0)
 else:
         if args.agent == 'ppo':
-            from Agent import PPOAgent
+            from agent import PPOAgent
 
             agent = PPOAgent(state_dim=env_rl.observation_space.shape[0], action_dim=env_rl.action_space.n,
                              gamma=args.gamma,
                              device=args.device)
         elif args.agent == 'dqn':
-            from Agent import DQNAgent
+            from agent import DQNAgent
 
             agent = DQNAgent(args, state_dim=env_rl.observation_space.shape[0], action_dim=env_rl.action_space.n)
         elif args.agent == 'dsac':
-            from Agent import DSACAgent
+            from agent import DSACAgent
 
             agent = DSACAgent(state_dim=env_rl.observation_space.shape[0], action_dim=env_rl.action_space.n,
                               device=args.device)
