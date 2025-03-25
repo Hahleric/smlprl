@@ -7,7 +7,7 @@ import torch
 from gym.core import RenderFrame
 import math
 
-from gym.spaces import Dict, Box
+from gym.spaces import Dict, Box, MultiDiscrete
 from matplotlib import pyplot as plt
 
 
@@ -24,11 +24,13 @@ def sample_request_item(pos_items, pos_ratings, zipf_s=1.0):
     chosen_idx = np.random.choice(len(sorted_items), p=probs)
     return int(sorted_items[chosen_idx])
 
+
 class CarCachingEnv(gym.Env):
     """
     模拟路口中车辆、RSU 与缓存决策过程的环境。
     状态包括车辆基本信息、缓存状态、候选集合得分以及新增的平均延迟信息。
     """
+
     def __init__(self, args, crossroad, recommender, norm_adj, num_items,
                  test_user_ratings, cache_capacity=3, zipf_s=1.0, topk_candidate=20,
                  use_recommendation_boost=True):
@@ -37,8 +39,8 @@ class CarCachingEnv(gym.Env):
         self.fig, self.ax = None, None
         self.args = args
         self.crossroad = crossroad
-        self.recommender = recommender    # 训练好的 LightGCN 模型
-        self.norm_adj = norm_adj          # 归一化邻接矩阵（应位于 args.device 上）
+        self.recommender = recommender.eval()  # 训练好的 LightGCN 模型
+        self.norm_adj = norm_adj  # 归一化邻接矩阵（应位于 args.device 上）
         self.num_items = num_items
         self.test_user_ratings = test_user_ratings
         self.cache_capacity = cache_capacity
@@ -48,15 +50,19 @@ class CarCachingEnv(gym.Env):
 
         # 状态空间：车辆平均位置(2) + 平均速度(2) + 平均带宽(1) + 当前缓存状态(cache_capacity)
         # + 当前候选集合的得分(topk_candidate) + 平均延迟(1)
-        self.feature_dim = 2 + 2 + 1 + self.cache_capacity + self.topk_candidate + 1
+        # self.feature_dim = 2 + 2 + 1 + self.cache_capacity + self.topk_candidate + 1
+        self.feature_dim = self.topk_candidate + 1
         self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(self.feature_dim,), dtype=np.float32)
-        self.action_dim_init = math.comb(self.topk_candidate, self.cache_capacity)
-        self.action_space = spaces.Discrete(self.action_dim_init)
 
-        self.current_cache = None  # 当前缓存配置（记录候选集合索引组合）
+        # 修改动作空间：
+        # 原来的动作空间是 MultiDiscrete([topk_candidate] * cache_capacity)，代表直接选择 cache_capacity 个候选项索引。
+        # 这里修改为 Box 空间，形状为 (topk_candidate,)，代表对整个候选集合的打分，
+        # 最终通过排序选择出得分最高的 cache_capacity 个候选项作为缓存配置。
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(self.topk_candidate,), dtype=np.float32)
+
+        self.current_cache = None  # 当前缓存配置，保存候选集合中的索引列表
         self.cache_candidate_set = None
         self.cache_candidate_scores = None  # 保存 LightGCN 得分
-        self.action_list = None
 
         # 新增属性用于延迟反馈与缓存更新惩罚
         self.last_avg_delay = 0.0
@@ -68,7 +74,7 @@ class CarCachingEnv(gym.Env):
     def update_candidate_set(self):
         """
         利用 LightGCN 预测用户对物品的评分，选取 topk_candidate 个物品作为候选缓存集合，
-        并更新所有可能的缓存组合动作空间。
+        并更新候选集合（不再枚举所有组合）。
         """
         user_ids = [v.user_id for v in self.crossroad.vehicles]
         if len(user_ids) == 0:
@@ -91,13 +97,10 @@ class CarCachingEnv(gym.Env):
                 topk_scores = topk.values.numpy()
                 self.cache_candidate_set = topk_items
                 self.cache_candidate_scores = topk_scores
-        # 更新动作空间：候选集合中选择 cache_capacity 个物品的所有组合
-        self.action_list = list(itertools.combinations(range(len(self.cache_candidate_set)), self.cache_capacity))
-        self.num_actions = len(self.action_list)
-        self.action_space = spaces.Discrete(self.num_actions)
-        # 默认初始缓存选择第一个组合
-        self.current_cache = self.action_list[0]
-        self.prev_cache = self.current_cache
+
+        # 默认初始缓存选择：直接选择候选集合前 cache_capacity 个文件
+        if self.current_cache is None:
+            self.current_cache = np.arange(self.cache_capacity)
 
     def reset(self):
         self.crossroad.vehicles = []
@@ -111,14 +114,24 @@ class CarCachingEnv(gym.Env):
 
     def step(self, action):
         previous_cache = self.current_cache
-        self.current_cache = self.action_list[action]
+        # 这里 action 现在为一个长度为 topk_candidate 的连续向量，
+        # 每个值代表对候选集合中对应物品的打分。
+        action = np.array(action).flatten()
+        if action.shape[0] != self.topk_candidate:
+            raise ValueError(f"Action must be of shape ({self.topk_candidate},) but got {action.shape}")
+        # 对候选集合打分进行降序排序，选取得分最高的 cache_capacity 个索引
+        ranking_indices = np.argsort(-action)
+        selected_indices = ranking_indices[:self.cache_capacity].tolist()
+        self.current_cache = selected_indices
+
+        # 根据当前候选集合索引得到真实物品 id 列表
         cache_files = [int(self.cache_candidate_set[idx]) for idx in self.current_cache]
 
         total_reward = 0.0
         total_delay = 0.0
         hit_count = 0
         total_requests = 0
-
+        k = 2
         # 遍历每辆车，根据它的请求频率发起请求
         for vehicle in self.crossroad.vehicles:
             num_requests = int(vehicle.request_frequency)
@@ -145,20 +158,23 @@ class CarCachingEnv(gym.Env):
 
                 if requested_item in cache_files:
                     delay = self.args.base_delay - self.args.hit_delay_reduction * (1 - normalized_distance)
-                    reward_request = self.args.hit_reward - self.args.delay_weight * delay
+
+                    reward_scale = 1 / (1 + math.exp(-k * (self.args.base_delay - delay)))
                     hit_count += 1
                     vehicle.request_frequency = min(vehicle.request_frequency + self.args.request_frequency_increment,
                                                     self.args.max_request_frequency)
+                    reward_request = self.args.hit_reward * reward_scale - self.args.delay_weight * delay
                 else:
                     delay = self.args.base_delay + self.args.miss_delay_penalty
-                    reward_request = self.args.miss_penalty - self.args.delay_weight * delay
+                    reward_scale = 1 / (1 + math.exp(-k * (self.args.base_delay - delay)))
                     vehicle.request_frequency = max(vehicle.request_frequency - self.args.request_frequency_decay,
                                                     self.args.base_request_frequency)
+                    reward_request = self.args.miss_penalty * (1 - reward_scale) - self.args.delay_weight * delay
                 total_reward += reward_request
                 total_delay += delay
                 total_requests += 1
-
-        if previous_cache != self.current_cache:
+        total_reward = total_reward / total_requests
+        if not np.array_equal(previous_cache, self.current_cache):
             total_reward -= self.args.cache_update_cost
 
         avg_delay = total_delay / total_requests if total_requests > 0 else 0.0
@@ -174,7 +190,8 @@ class CarCachingEnv(gym.Env):
             "cache_hits": int(hit_count),
             "total_requests": int(total_requests),
             "hit_rate": float(hit_count / total_requests if total_requests > 0 else 0.0),
-            "avg_delay": avg_delay
+            "avg_delay": avg_delay,
+            "avg_reward": avg_reward
         }
         if self.current_step % 50 == 0:
             print(f"Step {self.current_step}, Avg Reward: {avg_reward:.4f}, Hit Rate: {info['hit_rate']:.4f}, "
@@ -197,63 +214,36 @@ class CarCachingEnv(gym.Env):
 
         # Normalize position and speed values
         avg_position = avg_position / np.linalg.norm(avg_position) if np.linalg.norm(avg_position) > 0 else avg_position
-        avg_speed = avg_speed / np.linalg.norm(avg_speed) if np.linalg.norm(avg_speed) > 0 else avg_speed
+        # avg_speed = avg_speed / np.linalg.norm(avg_speed) if np.linalg.norm(avg_speed) > 0 else avg_speed
 
-        # Normalize缓存状态（假设 num_items 很大）
+        # 当前缓存状态：将当前缓存的候选项（item id）归一化
         cache_state = np.array([self.cache_candidate_set[idx] / self.args.num_items for idx in self.current_cache])
 
-        # Normalize candidate scores
-        candidate_scores = np.array(self.cache_candidate_scores)
-        if candidate_scores.max() > 1:
-            candidate_scores = candidate_scores / candidate_scores.max()
+        # 使用归一化后的候选集合 item id 作为状态的一部分
+        # self.cache_candidate_set 的长度为 topk_candidate
+        normalized_candidate_ids = np.array(self.cache_candidate_set, dtype=np.float32) / self.args.num_items
 
         # 平均延迟作为状态的最后一项（可以进一步归一化）
         avg_delay_feature = np.array([self.last_avg_delay])
 
         # 确保所有数组均为 1D
-        avg_position = avg_position.flatten()
-        avg_speed = avg_speed.flatten()
-        avg_bandwidth = avg_bandwidth.flatten()
-        cache_state = cache_state.flatten()
-        candidate_scores = candidate_scores.flatten()
+        # avg_position = avg_position.flatten()
+        # avg_speed = avg_speed.flatten()
+        # avg_bandwidth = avg_bandwidth.flatten()
+        normalized_candidate_scores = self.cache_candidate_scores.flatten()
+        # cache_state = cache_state.flatten()
+        normalized_candidate_ids = normalized_candidate_ids.flatten()
         avg_delay_feature = avg_delay_feature.flatten()
 
-        # 拼接并裁剪到 [-1, 1]
-        state = np.concatenate([avg_position, avg_speed, avg_bandwidth, cache_state, candidate_scores, avg_delay_feature], axis=0)
+        # 拼接状态，这里我们用候选 item id 替换了之前的候选得分
+        # 注意：normalized_candidate_ids 部分使得模型可以知道候选集合的情况，从而学习对其排序
+        state = np.concatenate(
+            # [avg_position, avg_speed, avg_bandwidth, cache_state, normalized_candidate_ids, avg_delay_feature], axis=0)
+            [normalized_candidate_scores, avg_delay_feature], axis=0)
         state = np.clip(state, -1.0, 1.0).astype(np.float32)
 
         return state
 
-    def render(self, render_mode='human'):
-        # 如果没有 fig 则新建
-        if self.fig is None or self.ax is None:
-            self.fig, self.ax = plt.subplots(figsize=(6,6))
-        self.ax.clear()
-        # 绘制环境（假设 RSU 位置、车辆位置等信息存在）
-        rsu_pos = self.crossroad.rsu.position
-        self.ax.plot(rsu_pos[0], rsu_pos[1], 'ro', markersize=10, label='RSU')
-        for vehicle in self.crossroad.vehicles:
-            pos = vehicle.position
-            self.ax.plot(pos[0], pos[1], 'bo', markersize=5)
-        self.ax.set_xlim(0, self.crossroad.width)
-        self.ax.set_ylim(0, self.crossroad.height)
-        self.ax.set_title("CarCachingEnv Render")
-        self.ax.legend()
-
-        # 在图中叠加统计信息
-        if self.last_info:
-            # 假设 info 中包含 'cache_hits', 'total_requests', 'hit_rate', 'avg_delay'
-            text = (f"Cache Hit Ratio: {self.last_info.get('hit_rate', 0):.2f}\n"
-                    f"Cache Hits: {self.last_info.get('cache_hits', 0)}/{self.last_info.get('total_requests', 0)}\n"
-                    f"Avg Delay: {self.last_info.get('avg_delay', 0):.2f}")
-            self.ax.text(0.05, 0.95, text, transform=self.ax.transAxes,
-                         fontsize=12, verticalalignment='top',
-                         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        self.fig.canvas.draw()
-        # 返回 RGB 数组（可选）
-        image = np.frombuffer(self.fig.canvas.tostring_rgb(), dtype=np.uint8)
-        image = image.reshape(self.fig.canvas.get_width_height()[::-1] + (3,))
-        return image
 
 def normalize_node_features(node_features, env):
     """

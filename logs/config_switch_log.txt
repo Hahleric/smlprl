@@ -1,0 +1,44 @@
+Step: 147456
+From: [256, 256]
+To:   [1024, 1024]
+Reason: EV 卡死、value_loss 上涨，准备突破瓶颈
+
+    new config:
+        parser.add_argument('--num_envs', type=int, default=8, help='并行环境数')
+        parser.add_argument('--sb3_max_steps', type=int, default=204800, help='SB3 训练的最大步数')
+        parser.add_argument('--sb3_vf_coef', type=float, default=0.9, help='SB3 Critic 损失中的 VF 系数')
+        parser.add_argument('--sb3_ent_coef', type=float, default=0.04, help='SB3 Actor 损失中的 Entropy 系数')
+        parser.add_argument('--sb3_clip_range', type=float, default=0.2, help='SB3 PPO 损失中的 Clip 范围')
+        parser.add_argument('--sb3_lr', type=float, default=0.00025, help='SB3 模型的基础学习率')
+        parser.add_argument('--num_vehicles', type=int, default=20, help='路口中的车辆数')
+        parser.add_argument('--cache_capacity', type=int, default=8, help='RSU 缓存容量，即可缓存的物品数量')
+        parser.add_argument('--num_requests_per_vehicle', type=int, default=1, help='默认每个车辆每个时间步发起的请求数（备用）')
+        parser.add_argument('--max_steps', type=int, default=1024, help='每个 episode 的最大步数')
+        parser.add_argument('--testing_step', type=int, default=64, help='测试时的步数')
+        parser.add_argument('--hit_threshold', type=float, default=100, help='命中率阈值, 用于奖励')
+        parser.add_argument('--cross_dt', type=float, default=5, help='路口模拟的时间步长')
+        parser.add_argument('--spawn_rate', type=float, default=1.2, help='每个时间步生成新车辆的期望数量')
+    epoch - 6
+    critic hidden dim - 1024
+
+Step: 164,608
+From: [1024, 1024]
+To:   [2048, 2048]
+
+Reason: 相同
+
+        parser.add_argument('--num_envs', type=int, default=8, help='并行环境数')
+        parser.add_argument('--sb3_max_steps', type=int, default=204800, help='SB3 训练的最大步数')
+        parser.add_argument('--sb3_vf_coef', type=float, default=0.9, help='SB3 Critic 损失中的 VF 系数')
+        parser.add_argument('--sb3_ent_coef', type=float, default=0.08, help='SB3 Actor 损失中的 Entropy 系数')
+        parser.add_argument('--sb3_clip_range', type=float, default=0.3, help='SB3 PPO 损失中的 Clip 范围')
+        parser.add_argument('--sb3_lr', type=float, default=0.00025, help='SB3 模型的基础学习率')
+        parser.add_argument('--num_vehicles', type=int, default=20, help='路口中的车辆数')
+        parser.add_argument('--cache_capacity', type=int, default=8, help='RSU 缓存容量，即可缓存的物品数量')
+        parser.add_argument('--num_requests_per_vehicle', type=int, default=1, help='默认每个车辆每个时间步发起的请求数（备用）')
+        parser.add_argument('--max_steps', type=int, default=1024, help='每个 episode 的最大步数')
+        parser.add_argument('--testing_step', type=int, default=64, help='测试时的步数')
+        parser.add_argument('--hit_threshold', type=float, default=100, help='命中率阈值, 用于奖励')
+        parser.add_argument('--cross_dt', type=float, default=5, help='路口模拟的时间步长')
+        parser.add_argument('--spawn_rate', type=float, default=1.2, help='每个时间步生成新车辆的期望数量')
+
