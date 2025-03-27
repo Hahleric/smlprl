@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import matplotlib.pyplot as plt
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
@@ -60,5 +62,6 @@ class MetricsLoggingCallback(BaseCallback):
         plt.legend()
         plt.grid(True, linestyle='--', alpha=0.6)
         plt.tight_layout()
+        plt.savefig("metrics_per_episode"+ str(datetime.now()) +".png")
         plt.show()
 

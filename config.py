@@ -64,7 +64,7 @@ def get_config():
     parser.add_argument('--buffer_size', type=int, default=1000, help='经验回放缓冲区大小')
     parser.add_argument('--batch_size', type=int, default=64, help='训练时每批样本大小')
     parser.add_argument('--num_envs', type=int, default=4, help='并行环境数')
-    parser.add_argument('--sb3_max_steps', type=int, default=204800, help='SB3 训练的最大步数')
+    parser.add_argument('--sb3_max_steps', type=int, default=1024000, help='SB3 训练的最大步数')
     parser.add_argument('--sb3_vf_coef', type=float, default=0.4, help='SB3 Critic 损失中的 VF 系数')
     parser.add_argument('--sb3_ent_coef', type=float, default=0.001, help='SB3 Actor 损失中的 Entropy 系数')
     parser.add_argument('--sb3_clip_range', type=float, default=0.3, help='SB3 PPO 损失中的 Clip 范围')
