@@ -103,8 +103,8 @@ def main():
                     pi=[1024, 1024, 512],
                     vf=[1024, 1024, 512]
                 ),
-                log_std_init=0,
-                activation_fn=nn.ReLU,
+                log_std_init=-2,
+                activation_fn=nn.Tanh,
                 share_features_extractor=False
 
             )

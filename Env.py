@@ -51,7 +51,7 @@ class CarCachingEnv(gym.Env):
         # 状态空间：车辆平均位置(2) + 平均速度(2) + 平均带宽(1) + 当前缓存状态(cache_capacity)
         # + 当前候选集合的得分(topk_candidate) + 平均延迟(1)
         # self.feature_dim = 2 + 2 + 1 + self.cache_capacity + self.topk_candidate + 1
-        self.feature_dim = self.topk_candidate + 1
+        self.feature_dim = self.topk_candidate + 1 + 1
         self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(self.feature_dim,), dtype=np.float32)
 
         # 修改动作空间：
@@ -231,6 +231,9 @@ class CarCachingEnv(gym.Env):
         # avg_speed = avg_speed.flatten()
         # avg_bandwidth = avg_bandwidth.flatten()
         normalized_candidate_scores = self.cache_candidate_scores.flatten()
+        # sort user_ids based on frequency
+        normalized_max_frequency_user = sorted(self.crossroad.vehicles, key=lambda x: x.request_frequency)[-1].user_id / self.args.num_users
+        normalized_max_frequency_user = np.array(normalized_max_frequency_user).flatten()
         # cache_state = cache_state.flatten()
         normalized_candidate_ids = normalized_candidate_ids.flatten()
         avg_delay_feature = avg_delay_feature.flatten()
@@ -239,7 +242,7 @@ class CarCachingEnv(gym.Env):
         # 注意：normalized_candidate_ids 部分使得模型可以知道候选集合的情况，从而学习对其排序
         state = np.concatenate(
             # [avg_position, avg_speed, avg_bandwidth, cache_state, normalized_candidate_ids, avg_delay_feature], axis=0)
-            [normalized_candidate_scores, avg_delay_feature], axis=0)
+            [normalized_candidate_scores, avg_delay_feature, normalized_max_frequency_user], axis=0)
         state = np.clip(state, -1.0, 1.0).astype(np.float32)
 
         return state
