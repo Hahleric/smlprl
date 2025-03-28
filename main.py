@@ -70,20 +70,21 @@ def main():
     from Env import CarCachingEnv, sample_request_item, GNNCarCachingEnv
     def make_env():
         def _init():
-            return CarCachingEnv(args, crossroad, recommender, norm_adj, num_items, test_user_ratings,
+            if args.use_gnn:
+                return GNNCarCachingEnv(args, crossroad, recommender, norm_adj, num_items, test_user_ratings,
+                                        cache_capacity=args.cache_capacity, zipf_s=args.rl_zipf_s, topk_candidate=20,
+                                        use_recommendation_boost=True)
+            else:
+                return CarCachingEnv(args, crossroad, recommender, norm_adj, num_items, test_user_ratings,
                                  cache_capacity=args.cache_capacity, zipf_s=args.rl_zipf_s, topk_candidate=20,
                                  use_recommendation_boost=True)
         return _init
     # 使用 RL 环境时，使用 args.rl_zipf_s
-    if args.use_gnn:
-        env_rl = GNNCarCachingEnv(args, crossroad, recommender, norm_adj, num_items, test_user_ratings,
-                                  cache_capacity=args.cache_capacity, zipf_s=args.rl_zipf_s, topk_candidate=20,
-                                  use_recommendation_boost=True)
-    else:
-        num_envs = args.num_envs  # 你可以试试 4~8
-        env_fns = [make_env() for _ in range(num_envs)]
-        venv = SubprocVecEnv(env_fns)
-        venv = VecNormalize(venv, norm_obs=False, norm_reward=True)
+
+    num_envs = args.num_envs
+    env_fns = [make_env() for _ in range(num_envs)]
+    venv = SubprocVecEnv(env_fns)
+    venv = VecNormalize(venv, norm_obs=False, norm_reward=False)
     num_episodes = args.episodes
     target_update_freq = 10
 
@@ -95,23 +96,34 @@ def main():
         if args.use_gnn:
             from gnn_agent import TorchGeoGNNPPOPolicy
 
-            ppo_model = PPO(TorchGeoGNNPPOPolicy, env_rl, verbose=1, device=args.sbl_device, n_steps=args.max_steps,
-                            policy_kwargs=dict(conv_type=args.gnn_conv_type))
+            ppo_model = PPO(TorchGeoGNNPPOPolicy,
+                            venv,
+                            verbose=2,
+                            device=args.sbl_device,
+                            n_steps=args.max_steps,
+                            learning_rate=args.sb3_lr,
+                            n_epochs=12,
+                            clip_range=args.sb3_clip_range,
+                            ent_coef=args.sb3_ent_coef,
+                            target_kl=args.sb3_target_kl,
+                            vf_coef=args.sb3_vf_coef,
+                            )
+            with torch.no_grad():
+                ppo_model.policy.log_std[:] = -1.8
         else:
             policy_kwargs = dict(
                 net_arch=dict(
-                    pi=[1024, 1024, 512],
-                    vf=[1024, 1024, 512]
+                    pi=[4096, 2048, 1024, 512, 256],
+                    vf=[4096, 2048, 1024, 512, 256]
                 ),
-                log_std_init=-2,
-                activation_fn=nn.Tanh,
+                log_std_init=-1.8,
+                activation_fn=nn.ReLU,
                 share_features_extractor=False
 
             )
             ppo_model = PPO("MlpPolicy",
                             venv,
                             verbose=2,
-                            batch_size=64,
                             device=args.sbl_device,
                             n_steps=args.max_steps,
                             learning_rate=args.sb3_lr,

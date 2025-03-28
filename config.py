@@ -35,11 +35,11 @@ def get_config():
 
     # 新增网络延迟与奖励相关参数
     parser.add_argument('--base_delay', type=float, default=1.0, help='基础延迟（单位可自定义）')
-    parser.add_argument('--hit_delay_reduction', type=float, default=0.3, help='缓存命中时减少的延迟')
-    parser.add_argument('--miss_delay_penalty', type=float, default=0.1, help='缓存未命中时增加的延迟')
-    parser.add_argument('--delay_weight', type=float, default=0.5, help='延迟对奖励的权重')
-    parser.add_argument('--hit_reward', type=float, default=0.5, help='缓存命中时的奖励基值')
-    parser.add_argument('--miss_penalty', type=float, default=-0.05, help='缓存未命中时的惩罚基值')
+    parser.add_argument('--hit_delay_reduction', type=float, default=0.9, help='缓存命中时减少的延迟')
+    parser.add_argument('--miss_delay_penalty', type=float, default=0.5, help='缓存未命中时增加的延迟')
+    parser.add_argument('--delay_weight', type=float, default=1, help='延迟对奖励的权重')
+    parser.add_argument('--hit_reward', type=float, default=5, help='缓存命中时的奖励基值')
+    parser.add_argument('--miss_penalty', type=float, default=-1, help='缓存未命中时的惩罚基值')
     parser.add_argument('--cache_update_cost', type=float, default=0, help='每次更新缓存的惩罚成本')
 
     # 用户请求行为相关
@@ -65,14 +65,24 @@ def get_config():
     parser.add_argument('--batch_size', type=int, default=64, help='训练时每批样本大小')
     parser.add_argument('--num_envs', type=int, default=4, help='并行环境数')
     parser.add_argument('--sb3_max_steps', type=int, default=1024000, help='SB3 训练的最大步数')
-    parser.add_argument('--sb3_vf_coef', type=float, default=0.4, help='SB3 Critic 损失中的 VF 系数')
+    parser.add_argument('--sb3_vf_coef', type=float, default=0.9, help='SB3 Critic 损失中的 VF 系数')
     parser.add_argument('--sb3_ent_coef', type=float, default=0.001, help='SB3 Actor 损失中的 Entropy 系数')
-    parser.add_argument('--sb3_clip_range', type=float, default=0.3, help='SB3 PPO 损失中的 Clip 范围')
-    parser.add_argument('--sb3_lr', type=float, default=0.0003, help='SB3 模型的基础学习率')
-    parser.add_argument('--sb3_target_kl', type=float, default=0.04, help='SB3 PPO 损失中的 KL 目标值')
+    parser.add_argument('--sb3_clip_range', type=float, default=0.2, help='SB3 PPO 损失中的 Clip 范围')
+    parser.add_argument('--sb3_lr', type=float, default=0.0002, help='SB3 模型的基础学习率')
+    parser.add_argument('--sb3_target_kl', type=float, default=1, help='SB3 PPO 损失中的 KL 目标值')
+
+    parser.add_argument('--sb3_gnn_max_steps', type=int, default=1024000, help='SB3 训练的最大步数')
+    parser.add_argument('--sb3_gnn_vf_coef', type=float, default=0.9, help='SB3 Critic 损失中的 VF 系数')
+    parser.add_argument('--sb3_gnn_ent_coef', type=float, default=0.001, help='SB3 Actor 损失中的 Entropy 系数')
+    parser.add_argument('--sb3_gnn_clip_range', type=float, default=0.2, help='SB3 PPO 损失中的 Clip 范围')
+    parser.add_argument('--sb3_gnn_lr', type=float, default=0.0002, help='SB3 模型的基础学习率')
+    parser.add_argument('--sb3_gnn_target_kl', type=float, default=1, help='SB3 PPO 损失中的 KL 目标值')
+
+
+
 
     # GNN 相关参数
-    parser.add_argument('--use_gnn', type=bool, default=False, help='是否使用 GNN 作为特征提取器')
+    parser.add_argument('--use_gnn', type=bool, default=True, help='是否使用 GNN 作为特征提取器')
     parser.add_argument('--gnn_conv_type', type=str, default='gat', help='GNN 使用的卷积类型')
     parser.add_argument('--gnn_max_vehicles', type=int, default=25, help='GNN 输入的最大车辆数')
 
