@@ -12,7 +12,7 @@ def get_config():
     parser.add_argument('--rl_zipf_s', type=float, default=5, help='RL 环境中 Zipf 分布参数')
     parser.add_argument('--trad_zipf_s', type=float, default=5, help='传统策略中 Zipf 分布参数')
     parser.add_argument('--pca_components', type=int, default=10, help='PCA 降维后的维度，用于生成用户兴趣向量')
-    parser.add_argument('--episodes', type=int, default=10, help='训练的总 episode 数')
+    parser.add_argument('--episodes', type=int, default=20, help='训练的总 episode 数')
     parser.add_argument('--use_sbl', type=bool, default=True, help='是否使用 SBL 进行预训练')
     parser.add_argument('--num_items', type=int, default=3952, help='物品总数')
     parser.add_argument('--num_users', type=int, default=6040, help='用户总数')
@@ -26,7 +26,7 @@ def get_config():
     parser.add_argument('--cache_capacity', type=int, default=3, help='RSU 缓存容量，即可缓存的物品数量')
     parser.add_argument('--num_requests_per_vehicle', type=int, default=1, help='默认每个车辆每个时间步发起的请求数（备用）')
     parser.add_argument('--max_steps', type=int, default=128, help='每个 episode 的最大步数')
-    parser.add_argument('--testing_step', type=int, default=32, help='测试时的步数')
+    parser.add_argument('--testing_step', type=int, default=1024, help='测试时的步数')
     parser.add_argument('--hit_threshold', type=float, default=0, help='命中率阈值, 用于奖励')
     parser.add_argument('--cross_dt', type=float, default=5, help='路口模拟的时间步长')
     parser.add_argument('--spawn_rate', type=float, default=1.2, help='每个时间步生成新车辆的期望数量')
@@ -64,14 +64,15 @@ def get_config():
     parser.add_argument('--buffer_size', type=int, default=1000, help='经验回放缓冲区大小')
     parser.add_argument('--batch_size', type=int, default=64, help='训练时每批样本大小')
     parser.add_argument('--num_envs', type=int, default=4, help='并行环境数')
-    parser.add_argument('--sb3_max_steps', type=int, default=1024000, help='SB3 训练的最大步数')
+    parser.add_argument('--sb3_max_steps', type=int, default=2048000, help='SB3 训练的最大步数')
     parser.add_argument('--sb3_vf_coef', type=float, default=0.9, help='SB3 Critic 损失中的 VF 系数')
     parser.add_argument('--sb3_ent_coef', type=float, default=0.001, help='SB3 Actor 损失中的 Entropy 系数')
     parser.add_argument('--sb3_clip_range', type=float, default=0.2, help='SB3 PPO 损失中的 Clip 范围')
     parser.add_argument('--sb3_lr', type=float, default=0.0002, help='SB3 模型的基础学习率')
     parser.add_argument('--sb3_target_kl', type=float, default=1, help='SB3 PPO 损失中的 KL 目标值')
 
-    parser.add_argument('--sb3_gnn_max_steps', type=int, default=1024000, help='SB3 训练的最大步数')
+    parser.add_argument('--sb3_gnn_max_steps', type=int, default=409600, help='SB3 训练的最大步数')
+    parser.add_argument('--max_gnn_steps', type=int, default=128, help='SB3 训练的最大步数')
     parser.add_argument('--sb3_gnn_vf_coef', type=float, default=0.9, help='SB3 Critic 损失中的 VF 系数')
     parser.add_argument('--sb3_gnn_ent_coef', type=float, default=0.001, help='SB3 Actor 损失中的 Entropy 系数')
     parser.add_argument('--sb3_gnn_clip_range', type=float, default=0.2, help='SB3 PPO 损失中的 Clip 范围')
@@ -83,7 +84,7 @@ def get_config():
 
     # GNN 相关参数
     parser.add_argument('--use_gnn', type=bool, default=True, help='是否使用 GNN 作为特征提取器')
-    parser.add_argument('--gnn_conv_type', type=str, default='gat', help='GNN 使用的卷积类型')
+    parser.add_argument('--gnn_conv_type', type=str, default='transformer', help='GNN 使用的卷积类型')
     parser.add_argument('--gnn_max_vehicles', type=int, default=25, help='GNN 输入的最大车辆数')
 
     # 如果使用 A2C 的话，可以单独设置 actor 和 critic 的学习率以及熵正则项
@@ -93,8 +94,9 @@ def get_config():
     parser.add_argument('--agent', type=str, default='ppo', help='RL agent going to be used')
 
     # 设备设置
-    parser.add_argument('--device', type=str, default='cpu', help='使用的设备，默认为 mps，如果不可用则为 cpu')
-    parser.add_argument('--sbl_device', type=str, default='cpu', help='SBL 预训练时使用的设备')
+    parser.add_argument('--device', type=str, default='cuda', help='使用的设备，默认为 mps，如果不可用则为 cpu')
+    parser.add_argument('--sbl_device', type=str, default='cuda', help='SBL 预训练时使用的设备')
+    parser.add_argument('--sbl_gnn_device', type=str, default='cuda', help='SBL 预训练时使用的设备')
 
     config = parser.parse_args()
     return config

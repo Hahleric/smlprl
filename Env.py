@@ -66,6 +66,7 @@ class CarCachingEnv(gym.Env):
 
         # 新增属性用于延迟反馈与缓存更新惩罚
         self.last_avg_delay = 0.0
+        self.last_personalized_delay = {}
         self.prev_cache = None
 
         self.current_step = 0
@@ -108,7 +109,7 @@ class CarCachingEnv(gym.Env):
             self.crossroad.generate_vehicle(user_id=i)
         self.update_candidate_set()
         self.current_step = 0
-        self.last_avg_delay = 0.0
+        self.last_avg_delay = self.args.base_delay
         obs = self._get_state()
         return obs
 
@@ -130,10 +131,12 @@ class CarCachingEnv(gym.Env):
         total_reward = 0.0
         total_delay = 0.0
         hit_count = 0
+
         total_requests = 0
         k = 2
         # 遍历每辆车，根据它的请求频率发起请求
         for vehicle in self.crossroad.vehicles:
+            delays = 0.0
             num_requests = int(vehicle.request_frequency)
             for _ in range(num_requests):
                 uid = vehicle.user_id
@@ -170,21 +173,27 @@ class CarCachingEnv(gym.Env):
                     vehicle.request_frequency = max(vehicle.request_frequency - self.args.request_frequency_decay,
                                                     self.args.base_request_frequency)
                     reward_request = self.args.miss_penalty * (1 - reward_scale) - self.args.delay_weight * delay
+                delays += delay
                 total_reward += reward_request
                 total_delay += delay
                 total_requests += 1
+            self.last_personalized_delay[vehicle.user_id] =  delays / num_requests
         total_reward = total_reward / total_requests
+
         if not np.array_equal(previous_cache, self.current_cache):
             total_reward -= self.args.cache_update_cost
 
+
         avg_delay = total_delay / total_requests if total_requests > 0 else 0.0
         avg_reward = total_reward / total_requests if total_requests > 0 else 0.0
-
+        if self.args.use_gnn:
+            next_state = self._get_state()
         self.crossroad.simulate_step(dt=self.args.cross_dt)
         self.update_candidate_set()
         self.current_step += 1
         self.last_avg_delay = avg_delay
-        next_state = self._get_state()
+        if not self.args.use_gnn:
+            next_state = self._get_state()
         done = (self.current_step >= self.max_steps)
         info = {
             "cache_hits": int(hit_count),
@@ -258,22 +267,22 @@ def normalize_node_features(node_features, env):
     """
     normed = np.copy(node_features)
     for i in range(normed.shape[0]):
-        # 归一化位置
-        pos = normed[i, 0:2]
-        norm = np.linalg.norm(pos)
-        if norm > 0:
-            normed[i, 0:2] = pos / norm
-        # 归一化速度
-        sp = normed[i, 2:4]
-        norm_sp = np.linalg.norm(sp)
-        if norm_sp > 0:
-            normed[i, 2:4] = sp / norm_sp
-        # 带宽 clip
-        normed[i, 4] = np.clip(normed[i, 4], -1.0, 1.0)
+        # # 归一化位置
+        # pos = normed[i, 0:2]
+        # norm = np.linalg.norm(pos)
+        # if norm > 0:
+        #     normed[i, 0:2] = pos / norm
+        # # 归一化速度
+        # sp = normed[i, 2:4]
+        # norm_sp = np.linalg.norm(sp)
+        # if norm_sp > 0:
+        #     normed[i, 2:4] = sp / norm_sp
+        # # 带宽 clip
+        # normed[i, 4] = np.clip(normed[i, 4], -1.0, 1.0)
         # 归一化 request_frequency（第6列）
         base_rf = env.args.base_request_frequency
         max_rf = env.args.max_request_frequency if hasattr(env.args, "max_request_frequency") else 10.0
-        normed[i, 5] = 2 * (normed[i, 5] - base_rf) / (max_rf - base_rf) - 1
+        normed[i, 1] = 2 * (normed[i, 1] - base_rf) / (max_rf - base_rf) - 1
         # 常数列保持不变
     normed = np.clip(normed, -1.0, 1.0)
     return normed
@@ -283,7 +292,7 @@ class GNNCarCachingEnv(CarCachingEnv):
         super(GNNCarCachingEnv, self).__init__(*args, **kwargs)
         # 固定最大节点数：RSU + 最大车辆数（由配置参数 gnn_max_vehicles 指定）
         max_nodes = self.args.gnn_max_vehicles + 1
-        node_feature_dim = 7
+        node_feature_dim = 2 + 1
         # 固定最大边数：对于星型拓扑，最大边数 = 自连接 max_nodes + 2*(max_nodes - 1) = 3*max_nodes - 2
         max_edges = 3 * max_nodes - 2
         from gym.spaces import Dict, Box
@@ -316,17 +325,18 @@ class GNNCarCachingEnv(CarCachingEnv):
             avg_bw = np.mean([v.get_bandwidth(self.crossroad.rsu.position) for v in vehicles])
         else:
             avg_bw = 0.0
-        rsu_feature = np.array([rsu_pos[0], rsu_pos[1], 0.0, 0.0, avg_bw, 0.0, 1.0], dtype=np.float32)
+        rsu_feature = np.array([ self.args.base_delay,0.0, 1.0], dtype=np.float32)
         # 车辆节点特征
         vehicle_features = []
         for v in vehicles:
             bw = v.get_bandwidth(self.crossroad.rsu.position)
-            feat = np.concatenate([v.position, v.speed, [bw], [v.request_frequency], [1.0]]).astype(np.float32)
+            delay = self.last_personalized_delay.get(v.user_id, self.args.base_delay)
+            feat = np.concatenate([[delay],[v.request_frequency], [1.0]]).astype(np.float32)
             vehicle_features.append(feat)
         if vehicle_features:
             vehicle_features = np.stack(vehicle_features, axis=0)
         else:
-            vehicle_features = np.empty((0, 7), dtype=np.float32)
+            vehicle_features = np.empty((0, self.feature_dim), dtype=np.float32)
         # 拼接 RSU 与车辆节点 -> shape: (n_actual, 7)
         node_features = np.concatenate([rsu_feature.reshape(1, -1), vehicle_features], axis=0)
         node_features = normalize_node_features(node_features, self)

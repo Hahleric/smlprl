@@ -68,9 +68,9 @@ def main():
     #############################################
     # 初始化车联网缓存环境（RL 环境）
     from Env import CarCachingEnv, sample_request_item, GNNCarCachingEnv
-    def make_env():
+    def make_env(testing=False):
         def _init():
-            if args.use_gnn:
+            if args.use_gnn and not testing:
                 return GNNCarCachingEnv(args, crossroad, recommender, norm_adj, num_items, test_user_ratings,
                                         cache_capacity=args.cache_capacity, zipf_s=args.rl_zipf_s, topk_candidate=20,
                                         use_recommendation_boost=True)
@@ -80,9 +80,9 @@ def main():
                                  use_recommendation_boost=True)
         return _init
     # 使用 RL 环境时，使用 args.rl_zipf_s
-
     num_envs = args.num_envs
     env_fns = [make_env() for _ in range(num_envs)]
+    env_rl = make_env()
     venv = SubprocVecEnv(env_fns)
     venv = VecNormalize(venv, norm_obs=False, norm_reward=False)
     num_episodes = args.episodes
@@ -93,28 +93,30 @@ def main():
     if args.use_sbl:
         from stable_baselines3 import PPO
         metrics_callback = MetricsLoggingCallback()
-        if args.use_gnn:
+        if args.use_gnn and not args.use_saved_rl:
             from gnn_agent import TorchGeoGNNPPOPolicy
 
             ppo_model = PPO(TorchGeoGNNPPOPolicy,
                             venv,
                             verbose=2,
-                            device=args.sbl_device,
-                            n_steps=args.max_steps,
-                            learning_rate=args.sb3_lr,
+                            device=args.sbl_gnn_device,
+                            n_steps=args.max_gnn_steps,
+                            learning_rate=args.sb3_gnn_lr,
                             n_epochs=12,
-                            clip_range=args.sb3_clip_range,
-                            ent_coef=args.sb3_ent_coef,
-                            target_kl=args.sb3_target_kl,
-                            vf_coef=args.sb3_vf_coef,
+                            clip_range=args.sb3_gnn_clip_range,
+                            ent_coef=args.sb3_gnn_ent_coef,
+                            target_kl=args.sb3_gnn_target_kl,
+                            vf_coef=args.sb3_gnn_vf_coef,
                             )
             with torch.no_grad():
-                ppo_model.policy.log_std[:] = -1.8
-        else:
+                ppo_model.policy.log_std[:] = -0.8 #-1.8 -> -0.5
+        elif not args.use_saved_rl:
             policy_kwargs = dict(
                 net_arch=dict(
                     pi=[4096, 2048, 1024, 512, 256],
                     vf=[4096, 2048, 1024, 512, 256]
+                    # pi = [2048, 1024, 512],
+                    # vf = [2048, 1024, 512]
                 ),
                 log_std_init=-1.8,
                 activation_fn=nn.ReLU,
@@ -138,11 +140,11 @@ def main():
         if not args.use_saved_rl:
             ppo_model.learn(total_timesteps=args.sb3_max_steps, progress_bar=True, callback=metrics_callback)
             ppo_model.save("ppo_model" + args.gnn_conv_type)
-            venv.save("vecnormalize.pkl")
+            venv.save("vecnormalize" + args.gnn_conv_type + str(datetime.date.today())  + ".pkl")
             metrics_callback.plot_metrics()
-        loaded_model = PPO.load("ppo_model" + args.gnn_conv_type +".zip")
+        loaded_model = PPO.load("ppo_model" + args.gnn_conv_type+ ".zip")
         venv = SubprocVecEnv([make_env() for _ in range(4)])
-        venv = VecNormalize.load("vecnormalize.pkl", venv)
+        venv = VecNormalize.load("vecnormalize" + args.gnn_conv_type + str(datetime.date.today())  + ".pkl", venv)
         venv.training = False  # 关闭训练模式
         venv.norm_reward = False
         obs = venv.reset()
@@ -151,7 +153,7 @@ def main():
             hits = 0
             requests = 0
             for _ in tqdm(range(args.testing_step)):
-                action, _states = ppo_model.predict(obs, deterministic=True)
+                action, _states = loaded_model.predict(obs, deterministic=True)
                 obs, reward, done, info = venv.step(action)
                 hits += info[0]['cache_hits']  # 注意：venv 返回的是 list
                 requests += info[0]['total_requests']

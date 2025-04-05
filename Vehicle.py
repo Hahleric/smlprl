@@ -59,9 +59,10 @@ class Crossroad:
             if self.user_interest_dict is not None:
                 user_id = np.random.choice(list(self.user_interest_dict.keys()))
             else:
-                user_id = self.vehicle_counter
-                self.vehicle_counter += 1
-                self.vehicle_counter = self.vehicle_counter % 6040
+                # user_id = self.vehicle_counter
+                # self.vehicle_counter += 1
+                # self.vehicle_counter = self.vehicle_counter % 6040
+                user_id = np.random.randint(0, 6040)
 
         if position is None:
             position = np.random.uniform([0, 0], [self.width, self.height])
